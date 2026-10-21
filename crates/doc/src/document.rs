@@ -2250,11 +2250,30 @@ pub struct CamTool {
     pub corner: f64,
 }
 
-/// Work coordinates, stock and tools. Contour jobs in `Document::cam` still load on their own.
+fn cam_axis_x() -> [f64; 3] {
+    [1.0, 0.0, 0.0]
+}
+fn cam_axis_z() -> [f64; 3] {
+    [0.0, 0.0, 1.0]
+}
+fn cam_axis_is_x(v: &[f64; 3]) -> bool {
+    *v == [1.0, 0.0, 0.0]
+}
+fn cam_axis_is_z(v: &[f64; 3]) -> bool {
+    *v == [0.0, 0.0, 1.0]
+}
+
+/// Work coordinates, stock and the bodies to machine. Contour jobs in `Document::cam` still load on their own.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CamSetup {
     pub name: String,
     pub origin: [f64; 3],
+    /// Unit X of the work coordinate system. Model X when a saved setup omits it.
+    #[serde(default = "cam_axis_x", skip_serializing_if = "cam_axis_is_x")]
+    pub x_axis: [f64; 3],
+    /// Unit Z of the work coordinate system (the spindle). Model Z when a saved setup omits it.
+    #[serde(default = "cam_axis_z", skip_serializing_if = "cam_axis_is_z")]
+    pub z_axis: [f64; 3],
     pub stock: [f64; 3],
     pub bodies: Vec<String>,
     pub tools: Vec<CamTool>,
@@ -2318,7 +2337,7 @@ pub struct GenerativeStudy {
     pub candidate: Option<String>,
 }
 
-/// A 2D contour toolpath.
+/// A machining toolpath. `gcode` is SolidCraft's own text, already in the setup's work coordinates.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CamJob {
     pub name: String,
@@ -2329,9 +2348,13 @@ pub struct CamJob {
     /// `contour`, `pocket`, or another operation. Empty means the original contour job.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
-    /// Profile area used by stock simulation, square millimetres.
+    /// Cleared area used by stock simulation, square millimetres. For a pocket this is the
+    /// region inside the tool-centre path.
     #[serde(default)]
     pub area: f64,
+    /// Machining setup this job was written in. Empty when the job has no setup.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub setup: String,
 }
 
 /// The document.

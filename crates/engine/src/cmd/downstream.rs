@@ -12,7 +12,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.setup", "Machining Setup", cam_setup)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
-        .params("name?; origin?: [x,y,z]; stock: [x,y,z] millimetres; bodies?: [names]"),
+        .params("name?; origin?: [x,y,z]; x_axis?, z_axis?: [x,y,z]; stock: [x,y,z] mm; bodies?: [names]"),
     CommandSpec::new("cam.tool", "Tool", cam_tool)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
@@ -20,20 +20,23 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.pocket", "2D Pocket", cam_pocket)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
-        .params("sketch: name; tool_diameter: mm; depth: mm. The path is the profile bounds inset by the tool radius"),
+        .params("sketch; tool_diameter; depth; stepdown?; stepover?. The tool centre stays a radius inside the profile and the cut is stepped"),
     CommandSpec::new("cam.face", "Face", cam_face)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
         .params("tool_diameter: mm. A pass over the latest setup's stock"),
-    CommandSpec::new("cam.drill", "Drill", cam_drill).at("UTILITIES", "MAKE").icon("extrude").params("body: name; diameter: mm; depth: mm"),
+    CommandSpec::new("cam.drill", "Drill", cam_drill)
+        .at("UTILITIES", "MAKE")
+        .icon("extrude")
+        .params("body; diameter; depth; stepdown?; at?: [x,y]. Peck steps down the hole"),
     CommandSpec::new("cam.adaptive", "3D Adaptive", cam_adaptive)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
         .params("body: name; tool_diameter: mm. A spiral of tool centres from outside the part in to the offset surface"),
-    CommandSpec::new("cam.post", "Post Process", cam_post).noundo().params("joins the stored toolpaths into one program"),
-    CommandSpec::new("cam.simulate", "Simulate Stock", cam_simulate)
+    CommandSpec::new("cam.post", "Post Process", cam_post)
         .noundo()
-        .params("removed and remaining stock from the toolpaths: a prism for a 2D path, a tool sweep for a 3D path"),
+        .params("units?: mm|inch; work?: G54..G59; safe_z?; name?. SolidCraft G-code text"),
+    CommandSpec::new("cam.simulate", "Simulate Stock", cam_simulate).noundo().params("measured removed volume and the stock volume that remains"),
     CommandSpec::new("cam.slot", "Slot", cam_slot)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
@@ -49,18 +52,22 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("extrude")
         .params("diameter; tool_diameter; depth; pitch?"),
     CommandSpec::new("cam.chamfer_2d", "2D Chamfer", cam_chamfer).at("UTILITIES", "MAKE").icon("extrude").params("sketch; tool_diameter; depth"),
-    CommandSpec::new("cam.recognize_holes", "Recognize Holes", cam_holes).noundo().params("body: name. Proposes drills and does not cut"),
+    CommandSpec::new("cam.recognize_holes", "Recognize Holes", cam_holes)
+        .params("body: name. Closed cylindrical holes become drill jobs; the solid is not cut"),
     CommandSpec::new("cam.parallel", "Parallel", cam_parallel)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
-        .params("body; tool_diameter. Samples stay outside the part"),
-    CommandSpec::new("cam.scallop", "Scallop", cam_scallop).at("UTILITIES", "MAKE").icon("extrude").params("body; tool_diameter"),
-    CommandSpec::new("cam.pencil", "Pencil", cam_pencil).at("UTILITIES", "MAKE").icon("extrude").params("body; tool_diameter"),
-    CommandSpec::new("cam.contour_3d", "3D Contour", cam_contour3d).at("UTILITIES", "MAKE").icon("extrude").params("body; tool_diameter"),
-    CommandSpec::new("cam.horizontal", "Horizontal", cam_horizontal).at("UTILITIES", "MAKE").icon("extrude").params("body; tool_diameter"),
-    CommandSpec::new("cam.flow", "Flow", cam_flow).at("UTILITIES", "MAKE").icon("extrude").params("body; tool_diameter"),
-    CommandSpec::new("cam.radial", "Radial", cam_radial).at("UTILITIES", "MAKE").icon("extrude").params("body; tool_diameter"),
-    CommandSpec::new("cam.spiral", "Spiral", cam_spiral).at("UTILITIES", "MAKE").icon("extrude").params("body; tool_diameter"),
+        .params("body; tool_diameter; stepover?. Ball-nose passes on the upper surface"),
+    CommandSpec::new("cam.scallop", "Scallop", cam_scallop)
+        .at("UTILITIES", "MAKE")
+        .icon("extrude")
+        .params("body; tool_diameter; stepover? or cusp?. Pass spacing comes from the cusp when stepover is omitted"),
+    CommandSpec::new("cam.pencil", "Pencil", cam_pencil).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
+    CommandSpec::new("cam.contour_3d", "3D Contour", cam_contour3d).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
+    CommandSpec::new("cam.horizontal", "Horizontal", cam_horizontal).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
+    CommandSpec::new("cam.flow", "Flow", cam_flow).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
+    CommandSpec::new("cam.radial", "Radial", cam_radial).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
+    CommandSpec::new("cam.spiral", "Spiral", cam_spiral).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
     CommandSpec::new("cam.turn.profile", "Turn Profile", cam_turn_profile)
         .at("UTILITIES", "MAKE")
         .icon("revolve")
@@ -123,8 +130,21 @@ fn finite(cmd: &str, n: f64, what: &str) -> Result<f64> {
     if n.is_finite() && n.abs() < 1e9 { Ok(n) } else { Err(bad(cmd, format!("`{what}` must be finite"))) }
 }
 
+fn axis_of(p: &Value, key: &str, cmd: &str, default: [f64; 3]) -> Result<[f64; 3]> {
+    match p.get(key) {
+        None => Ok(default),
+        Some(v) => {
+            let q = crate::params::vec3(v).ok_or_else(|| bad(cmd, format!("`{key}` must be [x, y, z]")))?;
+            Ok([q.x, q.y, q.z])
+        }
+    }
+}
+
 fn cam_setup(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "cam.setup";
+    if s.doc.cam_setups.len() >= 100 {
+        return Err(bad(cmd, "too many setups"));
+    }
     let stock = p.get("stock").and_then(Value::as_array).ok_or_else(|| bad(cmd, "`stock` is [x,y,z]"))?;
     if stock.len() != 3 {
         return Err(bad(cmd, "`stock` is [x,y,z]"));
@@ -137,20 +157,65 @@ fn cam_setup(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad(cmd, "stock size must be positive"));
         }
     }
-    let origin = p.get("origin").and_then(Value::as_array);
-    let mut at = [0.0; 3];
-    if let Some(origin) = origin {
-        for (i, slot) in at.iter_mut().enumerate() {
-            let n = origin.get(i).and_then(Value::as_f64).unwrap_or(0.0);
-            *slot = finite(cmd, n, "origin")?;
+    let origin = match p.get("origin") {
+        None => [0.0; 3],
+        Some(v) => {
+            let q = crate::params::vec3(v).ok_or_else(|| bad(cmd, "`origin` must be [x, y, z]"))?;
+            [q.x, q.y, q.z]
         }
+    };
+    let x_axis = axis_of(p, "x_axis", cmd, [1.0, 0.0, 0.0])?;
+    let z_axis = axis_of(p, "z_axis", cmd, [0.0, 0.0, 1.0])?;
+    let frame = solidcraft_geom::toolpath::WorkCoords::from_xz(
+        solidcraft_geom::Vec3::new(origin[0], origin[1], origin[2]),
+        solidcraft_geom::Vec3::new(x_axis[0], x_axis[1], x_axis[2]),
+        solidcraft_geom::Vec3::new(z_axis[0], z_axis[1], z_axis[2]),
+    )
+    .map_err(|e| bad(cmd, e))?;
+    let name = str_(p, "name").unwrap_or("Setup");
+    if name.is_empty() || name.len() > 200 {
+        return Err(bad(cmd, "the setup name is not usable"));
     }
-    let name = str_(p, "name").unwrap_or("Setup").to_string();
+    let bodies = match p.get("bodies") {
+        None => Vec::new(),
+        Some(Value::String(one)) => {
+            if one.is_empty() || one.len() > 200 {
+                return Err(bad(cmd, "a body name is not usable"));
+            }
+            if s.model.state().body(one).is_none() {
+                return Err(bad(cmd, format!("no body `{one}`")));
+            }
+            vec![one.clone()]
+        }
+        Some(Value::Array(items)) => {
+            if items.len() > 100 {
+                return Err(bad(cmd, "too many bodies"));
+            }
+            let mut names = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(body) = item.as_str() else {
+                    return Err(bad(cmd, "`bodies` must be a list of names"));
+                };
+                if body.is_empty() || body.len() > 200 {
+                    return Err(bad(cmd, "a body name is not usable"));
+                }
+                if s.model.state().body(body).is_none() {
+                    return Err(bad(cmd, format!("no body `{body}`")));
+                }
+                names.push(body.to_string());
+            }
+            names
+        }
+        Some(_) => return Err(bad(cmd, "`bodies` must be a list of names")),
+    };
+    let name = name.to_string();
     s.doc_mut().cam_setups.push(CamSetup {
         name: name.clone(),
-        origin: at,
+        origin,
+        x_axis: [frame.x.x, frame.x.y, frame.x.z],
+        z_axis: [frame.z.x, frame.z.y, frame.z.z],
         stock: size,
-        bodies: crate::params::string_list(p, "bodies"),
+        bodies,
         tools: Vec::new(),
     });
     Ok(json!({"setup": name}))
@@ -184,53 +249,11 @@ fn cam_tool(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn cam_pocket(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "cam.pocket";
-    let sketch = str_(p, "sketch").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`sketch` is required"))?.to_string();
-    let tool = finite(cmd, p.get("tool_diameter").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`tool_diameter` is required"))?, "tool_diameter")?;
-    let depth = finite(cmd, p.get("depth").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`depth` is required"))?, "depth")?;
-    if tool <= 0.0 || depth <= 0.0 {
-        return Err(bad(cmd, "tool diameter and depth must be positive"));
-    }
-    let state = s.model.state();
-    let solved = state.sketches.iter().find(|item| item.name == sketch).ok_or_else(|| bad(cmd, format!("no sketch `{sketch}`")))?;
-    let profile = solved.profiles.first().ok_or_else(|| bad(cmd, "the sketch needs one closed profile"))?;
-    let poly = profile.region.outer.polyline(0.05);
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for point in &poly {
-        min_x = min_x.min(point.x);
-        min_y = min_y.min(point.y);
-        max_x = max_x.max(point.x);
-        max_y = max_y.max(point.y);
-    }
-    let radius = tool * 0.5;
-    let width = max_x - min_x - tool;
-    let height = max_y - min_y - tool;
-    if !(width > 0.0 && height > 0.0) {
-        return Err(bad(cmd, "the tool does not fit inside the profile"));
-    }
-    let area = width * height;
-    let x0 = min_x + radius;
-    let y0 = min_y + radius;
-    let x1 = max_x - radius;
-    let y1 = max_y - radius;
-    let gcode = format!(
-        "G0 X{x0:.3} Y{y0:.3}\nG1 Z-{depth:.3} F200\nG1 X{x1:.3} Y{y0:.3}\nG1 X{x1:.3} Y{y1:.3}\nG1 X{x0:.3} Y{y1:.3}\nG1 X{x0:.3} Y{y0:.3}\n"
-    );
-    let name = str_(p, "name").unwrap_or("Pocket").to_string();
-    s.doc_mut().cam.push(solidcraft_doc::CamJob { name, sketch, tool_diameter: tool, depth, gcode, kind: "pocket".into(), area });
-    Ok(json!({"area": area}))
+    super::cam::pocket(s, p)
 }
 
-fn push_cam(s: &mut Session, name: &str, kind: &str, tool: f64, depth: f64, area: f64, gcode: String) {
-    s.doc_mut().cam.push(solidcraft_doc::CamJob {
-        name: name.into(),
-        sketch: String::new(),
-        tool_diameter: tool,
-        depth,
-        gcode,
-        kind: kind.into(),
-        area,
-    });
+fn push_cam(s: &mut Session, cmd: &str, name: &str, kind: &str, tool: f64, depth: f64, area: f64, gcode: String) -> Result<()> {
+    super::cam::remember_job(s, cmd, name, "", kind, tool, depth, area, gcode)
 }
 
 fn cam_face(s: &mut Session, p: &Value) -> Result<Value> {
@@ -242,24 +265,12 @@ fn cam_face(s: &mut Session, p: &Value) -> Result<Value> {
     let setup = s.doc.cam_setups.last().ok_or_else(|| bad(cmd, "create a setup first"))?;
     let (x, y) = (setup.stock[0], setup.stock[1]);
     let gcode = format!("G0 X0 Y0\nG1 X{x:.3} Y{y:.3} F300\n");
-    push_cam(s, "Face", "face", tool, 0.0, 0.0, gcode);
+    push_cam(s, cmd, "Face", "face", tool, 0.0, 0.0, gcode)?;
     Ok(json!({"stock": [x, y]}))
 }
 
 fn cam_drill(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "cam.drill";
-    let body = str_(p, "body").filter(|b| !b.is_empty()).ok_or_else(|| bad(cmd, "`body` is required"))?;
-    if s.model.state().body(body).is_none() {
-        return Err(bad(cmd, format!("no body `{body}`")));
-    }
-    let diameter = finite(cmd, p.get("diameter").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`diameter` is required"))?, "diameter")?;
-    let depth = finite(cmd, p.get("depth").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`depth` is required"))?, "depth")?;
-    if diameter <= 0.0 || depth <= 0.0 {
-        return Err(bad(cmd, "diameter and depth must be positive"));
-    }
-    let area = std::f64::consts::PI * diameter * diameter * 0.25;
-    push_cam(s, "Drill", "drill", diameter, depth, area, format!("G1 Z-{depth:.3}\n"));
-    Ok(json!({"area": area}))
+    super::cam::drill(s, p)
 }
 
 fn cam_adaptive(s: &mut Session, p: &Value) -> Result<Value> {
@@ -300,24 +311,12 @@ fn cam_adaptive(s: &mut Session, p: &Value) -> Result<Value> {
         gcode.push_str(&format!("G1 X{:.3} Y{:.3} Z{:.3}\n", point.x, point.y, point.z));
     }
     let depth = (half.z * 2.0).max(tool);
-    push_cam(s, "Adaptive", "adaptive", tool, depth, 0.0, gcode);
+    push_cam(s, cmd, "Adaptive", "adaptive", tool, depth, 0.0, gcode)?;
     Ok(json!({"samples": samples}))
 }
 
-fn cam_post(s: &mut Session, _p: &Value) -> Result<Value> {
-    let mut program = String::from("N10 G21\nN20 G54\n");
-    let mut line = 30;
-    for job in &s.doc.cam {
-        for row in job.gcode.lines().filter(|row| !row.trim().is_empty()) {
-            program.push_str(&format!("N{line} {row}\n"));
-            line += 10;
-            if line > 100_000 {
-                return Err(bad("cam.post", "the program is too long"));
-            }
-        }
-    }
-    program.push_str(&format!("N{line} M30\n"));
-    Ok(json!({"gcode": program}))
+fn cam_post(s: &mut Session, p: &Value) -> Result<Value> {
+    super::cam::post(s, p)
 }
 
 fn tool_depth(cmd: &str, p: &Value) -> Result<(f64, f64)> {
@@ -363,7 +362,7 @@ fn cam_slot(s: &mut Session, p: &Value) -> Result<Value> {
     let sketch = str_(p, "sketch").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`sketch` is required"))?.to_string();
     let (tool, depth) = tool_depth(cmd, p)?;
     let (area, gcode) = inset_path(cmd, sketch_bounds(s, &sketch, cmd)?, tool, depth)?;
-    s.doc_mut().cam.push(solidcraft_doc::CamJob { name: "Slot".into(), sketch, tool_diameter: tool, depth, gcode, kind: "slot".into(), area });
+    super::cam::remember_job(s, cmd, "Slot", &sketch, "slot", tool, depth, area, gcode)?;
     Ok(json!({"area": area}))
 }
 
@@ -381,7 +380,7 @@ fn traced(s: &mut Session, p: &Value, cmd: &str, kind: &str, name: &str) -> Resu
     let (min_x, min_y, max_x, max_y) = sketch_bounds(s, &sketch, cmd)?;
     let gcode = format!("G1 X{min_x:.3} Y{min_y:.3}\nG1 X{max_x:.3} Y{max_y:.3} Z-{depth:.3}\n");
     let area = (max_x - min_x) * (max_y - min_y);
-    s.doc_mut().cam.push(solidcraft_doc::CamJob { name: name.into(), sketch, tool_diameter: tool, depth, gcode, kind: kind.into(), area });
+    super::cam::remember_job(s, cmd, name, &sketch, kind, tool, depth, area, gcode)?;
     Ok(json!({"area": area}))
 }
 
@@ -394,7 +393,7 @@ fn cam_bore(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "the tool does not fit in the hole"));
     }
     let gcode = format!("G1 X{path_r:.3} Y0 Z-{depth:.3}\nG2 I-{path_r:.3}\n");
-    push_cam(s, "Bore", "bore", tool, depth, std::f64::consts::PI * path_r * path_r, gcode);
+    push_cam(s, cmd, "Bore", "bore", tool, depth, std::f64::consts::PI * path_r * path_r, gcode)?;
     Ok(json!({"radius": path_r}))
 }
 
@@ -418,7 +417,7 @@ fn cam_thread(s: &mut Session, p: &Value) -> Result<Value> {
         let ang = t * turns * std::f64::consts::TAU;
         gcode.push_str(&format!("G1 X{:.3} Y{:.3} Z-{:.3}\n", radius * ang.cos(), radius * ang.sin(), depth * t));
     }
-    push_cam(s, "Thread", "thread_mill", tool, depth, 0.0, gcode);
+    push_cam(s, cmd, "Thread", "thread_mill", tool, depth, 0.0, gcode)?;
     Ok(json!({"radius": radius}))
 }
 
@@ -427,81 +426,37 @@ fn cam_chamfer(s: &mut Session, p: &Value) -> Result<Value> {
     let sketch = str_(p, "sketch").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`sketch` is required"))?.to_string();
     let (tool, depth) = tool_depth(cmd, p)?;
     let (area, gcode) = inset_path(cmd, sketch_bounds(s, &sketch, cmd)?, tool, depth)?;
-    s.doc_mut().cam.push(solidcraft_doc::CamJob {
-        name: "Chamfer".into(),
-        sketch,
-        tool_diameter: tool,
-        depth,
-        gcode,
-        kind: "chamfer_2d".into(),
-        area,
-    });
+    super::cam::remember_job(s, cmd, "Chamfer", &sketch, "chamfer_2d", tool, depth, area, gcode)?;
     Ok(json!({"area": area}))
 }
 
 fn cam_holes(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "cam.recognize_holes";
-    let body = str_(p, "body").filter(|b| !b.is_empty()).ok_or_else(|| bad(cmd, "`body` is required"))?;
-    let solid = s.model.state().body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?.body.clone();
-    let measured = solidcraft_kernel::measure(&solid).map_err(|e| bad(cmd, e.to_string()))?;
-    let cylinders = measured.merged.face_types.get("cylinder").copied().unwrap_or(0);
-    let before = s.doc.cam.len();
-    Ok(json!({"proposed": cylinders, "jobs": s.doc.cam.len() - before}))
-}
-
-fn offset_samples(s: &Session, p: &Value, cmd: &str) -> Result<Vec<[f64; 3]>> {
-    let body = str_(p, "body").filter(|b| !b.is_empty()).ok_or_else(|| bad(cmd, "`body` is required"))?;
-    let solid = s.model.state().body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?.body.clone();
-    let tool = finite(cmd, p.get("tool_diameter").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`tool_diameter` is required"))?, "tool_diameter")?;
-    if tool <= 0.0 {
-        return Err(bad(cmd, "tool diameter must be positive"));
-    }
-    let measured = solidcraft_kernel::measure(&solid).map_err(|e| bad(cmd, e.to_string()))?;
-    let centre = (measured.bbox.min + measured.bbox.max) * 0.5;
-    let radius = (measured.bbox.max - centre).len().max((centre - measured.bbox.min).len()) + tool * 0.5;
-    let mut samples = Vec::new();
-    for i in 0..8 {
-        let ang = i as f64 * std::f64::consts::TAU / 8.0;
-        let point = centre + solidcraft_geom::Vec3::new(radius * ang.cos(), radius * ang.sin(), tool * 0.5);
-        if point.dist(centre) + 1e-6 < radius - tool * 0.5 {
-            return Err(bad(cmd, "the toolpath entered the body"));
-        }
-        samples.push([point.x, point.y, point.z]);
-    }
-    Ok(samples)
-}
-
-fn cam_style(s: &mut Session, p: &Value, cmd: &str, kind: &str) -> Result<Value> {
-    let samples = offset_samples(s, p, cmd)?;
-    let tool = p.get("tool_diameter").and_then(Value::as_f64).unwrap_or(1.0);
-    let gcode = samples.iter().map(|q| format!("G1 X{:.3} Y{:.3} Z{:.3}\n", q[0], q[1], q[2])).collect();
-    push_cam(s, kind, kind, tool, 0.0, 0.0, gcode);
-    Ok(json!({"samples": samples}))
+    super::cam::holes(s, p)
 }
 
 fn cam_parallel(s: &mut Session, p: &Value) -> Result<Value> {
-    cam_style(s, p, "cam.parallel", "parallel")
+    super::cam::surface(s, p, "cam.parallel", "parallel", false)
 }
 fn cam_scallop(s: &mut Session, p: &Value) -> Result<Value> {
-    cam_style(s, p, "cam.scallop", "scallop")
+    super::cam::surface(s, p, "cam.scallop", "scallop", true)
 }
 fn cam_pencil(s: &mut Session, p: &Value) -> Result<Value> {
-    cam_style(s, p, "cam.pencil", "pencil")
+    super::cam::not_yet(s, p, "cam.pencil")
 }
 fn cam_contour3d(s: &mut Session, p: &Value) -> Result<Value> {
-    cam_style(s, p, "cam.contour_3d", "contour_3d")
+    super::cam::not_yet(s, p, "cam.contour_3d")
 }
 fn cam_horizontal(s: &mut Session, p: &Value) -> Result<Value> {
-    cam_style(s, p, "cam.horizontal", "horizontal")
+    super::cam::not_yet(s, p, "cam.horizontal")
 }
 fn cam_flow(s: &mut Session, p: &Value) -> Result<Value> {
-    cam_style(s, p, "cam.flow", "flow")
+    super::cam::not_yet(s, p, "cam.flow")
 }
 fn cam_radial(s: &mut Session, p: &Value) -> Result<Value> {
-    cam_style(s, p, "cam.radial", "radial")
+    super::cam::not_yet(s, p, "cam.radial")
 }
 fn cam_spiral(s: &mut Session, p: &Value) -> Result<Value> {
-    cam_style(s, p, "cam.spiral", "spiral")
+    super::cam::not_yet(s, p, "cam.spiral")
 }
 
 fn cam_turn_profile(s: &mut Session, p: &Value) -> Result<Value> {
@@ -514,7 +469,7 @@ fn cam_turn_profile(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "the lathe setup needs stock along Z"));
     }
     let gcode = format!("G1 X{:.3} Z0\nG1 Z-{:.3}\n", radius, length);
-    push_cam(s, "Turn", "turn_profile", tool, length, 0.0, gcode);
+    push_cam(s, cmd, "Turn", "turn_profile", tool, length, 0.0, gcode)?;
     Ok(json!({"length": length}))
 }
 
@@ -526,7 +481,7 @@ fn cam_turn_groove(s: &mut Session, p: &Value) -> Result<Value> {
     if tool <= 0.0 || width <= 0.0 || depth <= 0.0 || s.doc.cam_setups.is_empty() {
         return Err(bad(cmd, "a groove needs a lathe setup, width and depth"));
     }
-    push_cam(s, "Groove", "turn_groove", tool, depth, width * depth, format!("G1 X-{depth:.3}\nG1 Z-{width:.3}\n"));
+    push_cam(s, cmd, "Groove", "turn_groove", tool, depth, width * depth, format!("G1 X-{depth:.3}\nG1 Z-{width:.3}\n"))?;
     Ok(json!({"width": width, "depth": depth}))
 }
 
@@ -538,7 +493,7 @@ fn cam_turn_thread(s: &mut Session, p: &Value) -> Result<Value> {
     if tool <= 0.0 || pitch <= 0.0 || depth <= 0.0 || s.doc.cam_setups.is_empty() {
         return Err(bad(cmd, "a thread needs a lathe setup"));
     }
-    push_cam(s, "Turn thread", "turn_thread", tool, depth, 0.0, format!("G33 Z-{depth:.3} K{pitch:.3}\n"));
+    push_cam(s, cmd, "Turn thread", "turn_thread", tool, depth, 0.0, format!("G33 Z-{depth:.3} K{pitch:.3}\n"))?;
     Ok(json!({"pitch": pitch}))
 }
 
@@ -572,7 +527,7 @@ fn cam_additive(s: &mut Session, p: &Value) -> Result<Value> {
         let z = measured.bbox.min.z + (i as f64 + 1.0) * layer;
         gcode.push_str(&format!("G1 X{:.3} Y{:.3} Z{:.3}\n", measured.bbox.min.x, measured.bbox.min.y, z));
     }
-    push_cam(s, "Additive", "additive", layer, height, 0.0, gcode);
+    push_cam(s, cmd, "Additive", "additive", layer, height, 0.0, gcode)?;
     Ok(json!({"layers": layers}))
 }
 
@@ -713,15 +668,34 @@ fn job_removed(job: &solidcraft_doc::CamJob) -> f64 {
     if three_d {
         return tool_sweep(&points, job.tool_diameter * 0.5);
     }
+    // A 2D job stores the cleared area (the tool-centre region for a pocket). Depth steps
+    // do not multiply that volume: the floor is cut once.
+    if job.area > 0.0 && job.depth.is_finite() && job.depth > 0.0 {
+        return job.area * job.depth;
+    }
     let prism = path_prism(&points, job.depth);
-    if prism > 1e-9 { prism } else { job.area * job.depth }
+    if prism > 1e-9 { prism } else { (job.area * job.depth).max(0.0) }
 }
 
 fn cam_simulate(s: &mut Session, _p: &Value) -> Result<Value> {
-    let setup = s.doc.cam_setups.last().ok_or_else(|| bad("cam.simulate", "create a setup first"))?;
+    let cmd = "cam.simulate";
+    let setup = s.doc.cam_setups.last().ok_or_else(|| bad(cmd, "create a setup first"))?;
     let stock = setup.stock[0] * setup.stock[1] * setup.stock[2];
-    let removed: f64 = s.doc.cam.iter().map(job_removed).sum();
-    Ok(json!({"removed": removed, "remaining": (stock - removed).max(0.0), "method": "toolpath"}))
+    if !(stock.is_finite() && stock > 0.0) {
+        return Err(bad(cmd, "the stock volume is not usable"));
+    }
+    let mut removed = 0.0;
+    for job in &s.doc.cam {
+        let volume = job_removed(job);
+        if !(volume.is_finite() && volume >= 0.0) {
+            return Err(bad(cmd, "a toolpath has no measurable volume"));
+        }
+        removed += volume;
+    }
+    if !removed.is_finite() {
+        return Err(bad(cmd, "the removed volume is not measurable"));
+    }
+    Ok(json!({"removed": removed, "remaining": (stock - removed).max(0.0), "stock": stock, "method": "toolpath"}))
 }
 
 fn push_study(s: &mut Session, p: &Value, kind: &str) -> Result<Value> {

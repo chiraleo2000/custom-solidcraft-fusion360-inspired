@@ -17,6 +17,7 @@ mod mesh;
 mod pack;
 mod plane;
 mod profile;
+pub mod toolpath;
 pub mod tspline;
 mod vec;
 
