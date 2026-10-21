@@ -39,6 +39,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("view.fit", "Fit View", fit).noundo().doc_only().params(
         "camera: {target, yaw, pitch, roll, distance, fov?, up?}; aspect: number > 0 (width ÷ height); selection?: bool (frame selected bodies instead of the model). Returns {camera, changed}. An empty scene returns the camera unchanged and changed:false",
     ),
+    CommandSpec::new("view.orient", "Orient View", orient_cmd).noundo().doc_only().params(
+        "direction: [x, y, z] each −1, 0 or 1, not all zero; camera: {target, yaw, pitch, roll, distance, fov?, up?}. Looks from that diagonal with Z kept up",
+    ),
 ];
 
 fn top(s: &mut Session, p: &Value) -> Result<Value> {
@@ -59,6 +62,32 @@ fn home(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn isometric(s: &mut Session, p: &Value) -> Result<Value> {
     standard("view.standard.isometric", "isometric", s, p)
+}
+
+fn orient_cmd(s: &mut Session, p: &Value) -> Result<Value> {
+    let _ = s;
+    let cmd = "view.orient";
+    let coords = p.get("direction").and_then(Value::as_array).ok_or_else(|| bad(cmd, "`direction` must be [x, y, z]"))?;
+    if coords.len() != 3 {
+        return Err(bad(cmd, "`direction` must be [x, y, z]"));
+    }
+    let mut dir = [0i8; 3];
+    for (i, c) in coords.iter().enumerate() {
+        let n = c.as_i64().or_else(|| c.as_f64().filter(|x| x.fract() == 0.0).map(|x| x as i64));
+        let Some(n) = n.filter(|n| (-1..=1).contains(n)) else {
+            return Err(bad(cmd, "a direction component must be -1, 0 or 1"));
+        };
+        if let Some(slot) = dir.get_mut(i) {
+            *slot = n as i8;
+        }
+    }
+    let eye = solidcraft_render::eye_direction(dir).ok_or_else(|| bad(cmd, "the direction must not be zero"))?;
+    let cam = camera_of(cmd, p)?;
+    let oriented = cam.looking_from(eye);
+    if !oriented.is_valid() {
+        return Err(bad(cmd, "the view produced an invalid camera"));
+    }
+    Ok(json!({"camera": oriented}))
 }
 
 fn standard(cmd: &str, name: &str, s: &mut Session, p: &Value) -> Result<Value> {
@@ -231,5 +260,30 @@ mod tests {
             cases += 1;
         }
         assert!(cases >= 100, "property ran {cases} times");
+    }
+
+    /// Feature: fusion360-feature-parity, Property 18: View orientation preserves Z-up
+    #[test]
+    fn property_18_diagonal_views_keep_z_up_and_do_not_edit_the_design() {
+        let mut s = Session::default();
+        let before = s.doc.to_json();
+        let cam = Camera::default();
+        let mut cases = 0usize;
+        for dir in solidcraft_render::view_directions() {
+            let out = s.execute("view.orient", &json!({"direction": dir, "camera": camera_json(&cam)})).unwrap_or_else(|e| panic!("{dir:?}: {e}"));
+            let back: Camera = serde_json::from_value(out["camera"].clone()).expect("camera");
+            assert!(back.is_valid());
+            assert_eq!(back.roll, 0.0);
+            assert_eq!(back.up, solidcraft_render::UpAxis::Z);
+            assert_eq!(back.target, cam.target);
+            let eye = back.back();
+            let want = solidcraft_render::eye_direction(dir).expect("dir");
+            assert!(eye.dist(want) < 1e-6, "{dir:?} eye {eye:?} want {want:?}");
+            cases += 1;
+        }
+        assert!(s.execute("view.orient", &json!({"direction": [0, 0, 0], "camera": camera_json(&cam)})).is_err());
+        assert!(s.execute("view.orient", &json!({"direction": [2, 0, 0], "camera": camera_json(&cam)})).is_err());
+        assert_eq!(s.doc.to_json(), before);
+        assert_eq!(cases, 26);
     }
 }

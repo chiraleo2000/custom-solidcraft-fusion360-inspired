@@ -33,6 +33,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         .doc_only()
         .params("query?: text. Returns matching command ids. The shell opens the command palette"),
     CommandSpec::new("ui.repeat_last", "Repeat Last Command", repeat_last).noundo().params("runs the previous command again"),
+    CommandSpec::new("ui.context_menu", "Context Menu", context_menu)
+        .noundo()
+        .doc_only()
+        .params("area?: SOLID|SKETCH|SURFACE|ASSEMBLE. Returns enabled commands for that toolbar tab, plus repeat when there is a previous command"),
+    CommandSpec::new("ui.select_depth", "Depth Chooser", select_depth).noundo().doc_only().params(
+        "candidates: [{id, kind, depth, min:[x,y], max:[x,y], anchor:[x,y]}]. Returns them nearest-first. Nothing is hidden",
+    ),
 ];
 
 fn steps_of(cmd: &str, p: &Value, required: bool) -> Result<usize> {
@@ -122,6 +129,62 @@ fn repeat_last(s: &mut Session, _p: &Value) -> Result<Value> {
         return Err(bad("ui.repeat_last", "there is no command to repeat"));
     };
     s.execute(&id, &params)
+}
+
+fn context_menu(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ui.context_menu";
+    let area = crate::params::str_(p, "area").unwrap_or("SOLID").to_ascii_uppercase();
+    if area.len() > 32 {
+        return Err(bad(cmd, "the area name is too long"));
+    }
+    let mut ids = Vec::new();
+    if s.last_command.is_some() {
+        ids.push("ui.repeat_last");
+    }
+    for spec in super::command_specs() {
+        if spec.tab == area && (spec.enabled)(s).is_ok() {
+            ids.push(spec.id);
+        }
+        if ids.len() >= 40 {
+            break;
+        }
+    }
+    Ok(serde_json::json!({"commands": ids}))
+}
+
+fn select_depth(s: &mut Session, p: &Value) -> Result<Value> {
+    let _ = s;
+    let cmd = "ui.select_depth";
+    let Some(list) = p.get("candidates").and_then(Value::as_array) else {
+        return Err(bad(cmd, "`candidates` must be a list"));
+    };
+    if list.len() > 4_096 {
+        return Err(bad(cmd, "too many candidates"));
+    }
+    let mut picks = Vec::new();
+    for item in list {
+        let id = item.get("id").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "a candidate needs an id"))?;
+        let kind = solidcraft_render::PickKind::parse(item.get("kind").and_then(Value::as_str).unwrap_or("face"))
+            .ok_or_else(|| bad(cmd, "unknown candidate kind"))?;
+        let depth = item.get("depth").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "a candidate needs a depth"))?;
+        let min = pair(item.get("min")).ok_or_else(|| bad(cmd, "`min` must be [x, y]"))?;
+        let max = pair(item.get("max")).ok_or_else(|| bad(cmd, "`max` must be [x, y]"))?;
+        let anchor = pair(item.get("anchor")).unwrap_or(min);
+        picks.push(solidcraft_render::Pickable { id, kind, depth, min, max, anchor });
+    }
+    let ordered = solidcraft_render::depth_stack(&picks, solidcraft_render::SelectFilter::ALL);
+    let ids: Vec<u64> = ordered.iter().map(|p| p.id).collect();
+    Ok(serde_json::json!({"ids": ids}))
+}
+
+fn pair(v: Option<&Value>) -> Option<solidcraft_geom::Vec2> {
+    let arr = v?.as_array()?;
+    if arr.len() != 2 {
+        return None;
+    }
+    let x = arr.first()?.as_f64()?;
+    let y = arr.get(1)?.as_f64()?;
+    Some(solidcraft_geom::Vec2::new(x, y))
 }
 
 #[cfg(test)]

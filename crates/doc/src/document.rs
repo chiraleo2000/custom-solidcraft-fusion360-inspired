@@ -1111,6 +1111,48 @@ pub enum FeatureKind {
     MeshReverse {
         body: String,
     },
+    /// A box that encloses one prototype, grown by `margin` on every side.
+    MoldBox {
+        body: String,
+        #[serde(default = "zero_expr")]
+        margin: String,
+    },
+    /// The prototype cut out of the mold box. The prototype body is kept.
+    MoldCavity {
+        mold: String,
+        tool: String,
+    },
+    /// The mold body split by a plane. The original name keeps one half; the other is new.
+    MoldSplit {
+        body: String,
+        plane: PlaneRef,
+    },
+    /// Bosses on `upper` and matching holes in `lower`, at the four corners of their overlap.
+    AlignmentPins {
+        upper: String,
+        lower: String,
+        diameter: String,
+        depth: String,
+    },
+    /// A channel cut from outside the mold into the cavity.
+    PourSpout {
+        body: String,
+        width: String,
+        depth: String,
+    },
+    /// Faces of a body moved inward by `gap` so a printed mate has clearance.
+    ClearanceGap {
+        body: String,
+        gap: String,
+    },
+    /// Bodies laid out on a rectangular bed. The arrangement is reapplied on refresh.
+    Nesting {
+        bodies: Vec<String>,
+        width: String,
+        depth: String,
+        #[serde(default = "zero_expr")]
+        gap: String,
+    },
 }
 
 /// One recorded edit of a form cage.
@@ -1455,6 +1497,13 @@ impl FeatureKind {
             | K::MeshMergeGroups { .. }
             | K::MeshShell { .. }
             | K::MeshReverse { .. }
+            | K::MoldBox { .. }
+            | K::MoldCavity { .. }
+            | K::MoldSplit { .. }
+            | K::AlignmentPins { .. }
+            | K::PourSpout { .. }
+            | K::ClearanceGap { .. }
+            | K::Nesting { .. }
             | K::BodyTransfer { .. } => Vec::new(),
         }
     }
@@ -1561,6 +1610,13 @@ impl FeatureKind {
             FeatureKind::MeshMergeGroups { .. } => "MeshMergeGroupsFeature",
             FeatureKind::MeshShell { .. } => "MeshShellFeature",
             FeatureKind::MeshReverse { .. } => "MeshReverseFeature",
+            FeatureKind::MoldBox { .. } => "MoldBoxFeature",
+            FeatureKind::MoldCavity { .. } => "MoldCavityFeature",
+            FeatureKind::MoldSplit { .. } => "MoldSplitFeature",
+            FeatureKind::AlignmentPins { .. } => "AlignmentPinsFeature",
+            FeatureKind::PourSpout { .. } => "PourSpoutFeature",
+            FeatureKind::ClearanceGap { .. } => "ClearanceGapFeature",
+            FeatureKind::Nesting { .. } => "NestingFeature",
         }
     }
     /// Default name prefix (`Extrude` → `Extrude1`).
@@ -1645,6 +1701,13 @@ impl FeatureKind {
             FeatureKind::MeshMergeGroups { .. } => "MergeGroups",
             FeatureKind::MeshShell { .. } => "ShellMesh",
             FeatureKind::MeshReverse { .. } => "ReverseMesh",
+            FeatureKind::MoldBox { .. } => "MoldBox",
+            FeatureKind::MoldCavity { .. } => "MoldCavity",
+            FeatureKind::MoldSplit { .. } => "MoldSplit",
+            FeatureKind::AlignmentPins { .. } => "AlignmentPins",
+            FeatureKind::PourSpout { .. } => "PourSpout",
+            FeatureKind::ClearanceGap { .. } => "Clearance",
+            FeatureKind::Nesting { .. } => "Nest",
         }
     }
     /// Every expression the feature uses.
@@ -1723,7 +1786,8 @@ impl FeatureKind {
             FeatureKind::Sketch { plane, .. }
             | FeatureKind::ConstructionPlane { plane }
             | FeatureKind::Split { plane, .. }
-            | FeatureKind::SplitFace { plane, .. } => plane_exprs(plane, &mut v),
+            | FeatureKind::SplitFace { plane, .. }
+            | FeatureKind::MoldSplit { plane, .. } => plane_exprs(plane, &mut v),
             FeatureKind::Extrude { extent, .. } => {
                 v.push(&extent.distance);
                 if let Some(d) = &extent.distance2 {
@@ -1885,7 +1949,13 @@ impl FeatureKind {
             | FeatureKind::MeshSeparate { .. }
             | FeatureKind::MeshCombine { .. }
             | FeatureKind::MeshMergeGroups { .. }
-            | FeatureKind::MeshReverse { .. } => {}
+            | FeatureKind::MeshReverse { .. }
+            | FeatureKind::MoldCavity { .. } => {}
+            FeatureKind::MoldBox { margin, .. } => v.push(margin),
+            FeatureKind::AlignmentPins { diameter, depth, .. } => v.extend([diameter.as_str(), depth.as_str()]),
+            FeatureKind::PourSpout { width, depth, .. } => v.extend([width.as_str(), depth.as_str()]),
+            FeatureKind::ClearanceGap { gap, .. } => v.push(gap),
+            FeatureKind::Nesting { width, depth, gap, .. } => v.extend([width.as_str(), depth.as_str(), gap.as_str()]),
         }
         v
     }

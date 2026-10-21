@@ -305,7 +305,24 @@ impl FeatureKind {
             | FeatureKind::MeshSeparate { .. }
             | FeatureKind::MeshCombine { .. }
             | FeatureKind::MeshMergeGroups { .. }
-            | FeatureKind::MeshReverse { .. } => {}
+            | FeatureKind::MeshReverse { .. }
+            | FeatureKind::MoldCavity { .. }
+            | FeatureKind::MoldSplit { .. } => {}
+            FeatureKind::MoldBox { margin, .. } => v.push(("Margin", margin, L)),
+            FeatureKind::AlignmentPins { diameter, depth, .. } => {
+                v.push(("Diameter", diameter, L));
+                v.push(("Depth", depth, L));
+            }
+            FeatureKind::PourSpout { width, depth, .. } => {
+                v.push(("Width", width, L));
+                v.push(("Depth", depth, L));
+            }
+            FeatureKind::ClearanceGap { gap, .. } => v.push(("Gap", gap, L)),
+            FeatureKind::Nesting { width, depth, gap, .. } => {
+                v.push(("Width", width, L));
+                v.push(("Depth", depth, L));
+                v.push(("Gap", gap, L));
+            }
             FeatureKind::Form { length, width, thickness, .. } => {
                 v.push(("Length", length, L));
                 v.push(("Width", width, L));

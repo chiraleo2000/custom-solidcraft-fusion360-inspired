@@ -36,6 +36,7 @@ mod inspect;
 pub(crate) mod joints;
 mod measure_sel;
 mod mesh;
+mod mold;
 pub(crate) mod motion;
 mod parts;
 mod section;
@@ -212,6 +213,7 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(features::COMMANDS.iter());
     v.extend(features_more::COMMANDS.iter());
     v.extend(mesh::COMMANDS.iter());
+    v.extend(mold::COMMANDS.iter());
     v.extend(form::COMMANDS.iter());
     v.extend(drawing::COMMANDS.iter());
     v.extend(cam::COMMANDS.iter());

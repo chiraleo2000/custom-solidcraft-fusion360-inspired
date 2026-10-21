@@ -13,12 +13,14 @@ pub mod bspline;
 pub mod env;
 pub mod fill;
 mod mesh;
+mod pack;
 mod plane;
 mod profile;
 pub mod tspline;
 mod vec;
 
 pub use mesh::{Aabb3, InsideIndex, Mesh, MeshMeasure};
+pub use pack::pack_shelf;
 pub use plane::Plane;
 pub use profile::{Loop2, MAX_BEZIER_DEGREE, Region2, Seg2, bezier};
 pub use vec::{Vec2, Vec3};

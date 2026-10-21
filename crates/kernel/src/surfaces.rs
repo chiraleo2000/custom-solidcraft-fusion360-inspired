@@ -303,6 +303,25 @@ fn map_pt(off: &Offset, p: mt::Point3, d: f64) -> mt::Point3 {
     p3(off.map(from_p3(p), d))
 }
 
+/// Unit normal when every point lies on one plane, otherwise nothing.
+fn coplanar_normal(pts: &[Vec3]) -> Option<Vec3> {
+    if pts.len() < 3 || pts.len() > 20_000 {
+        return None;
+    }
+    let mut n = Vec3::ZERO;
+    for i in 0..pts.len() {
+        let a = pts[i];
+        let b = pts[(i + 1) % pts.len()];
+        n.x += (a.y - b.y) * (a.z + b.z);
+        n.y += (a.z - b.z) * (a.x + b.x);
+        n.z += (a.x - b.x) * (a.y + b.y);
+    }
+    let n = n.normalized()?;
+    let origin = pts[0];
+    let scale = pts.iter().map(|p| p.dist(origin)).fold(0.0_f64, f64::max).max(1.0);
+    if pts.iter().all(|p| (*p - origin).dot(n).abs() <= scale * 1e-6 + 1e-7) { Some(n) } else { None }
+}
+
 /// A curve moved by an offset (control points mapped; exact for lines, and for circles square
 /// to a cylinder's axis or in a plane).
 fn map_curve(off: &Offset, c: &mt::Curve, d: f64) -> Result<mt::Curve> {
@@ -364,6 +383,93 @@ fn map_surface(off: &Offset, s: &mt::Surface, d: f64) -> Result<mt::Surface> {
             mt::Surface::NurbsSurface(mt::NurbsSurface::new(mt::BSplineSurface::new((nb.uknot_vec().clone(), nb.vknot_vec().clone()), rows)))
         }
         _ => return Err(KernelError::Invalid("not supported yet: thickening this kind of surface".into())),
+    })
+}
+
+/// A parallel copy of a surface. Planes slide along their normal; circular cylinders change
+/// radius. Sharp edges whose faces disagree, and surfaces that are neither, are refused.
+pub fn surface_offset(body: &Body, distance: f64) -> Result<Body> {
+    body.require_brep("surface offset")?;
+    if !(distance.is_finite() && distance.abs() > 1e-9 && distance.abs() < 1.0e6) {
+        return Err(KernelError::Invalid("offset distance must be a finite non-zero length".into()));
+    }
+    guard("surface.offset", || {
+        let faces: Vec<mt::Face> = body.solid.face_iter().cloned().collect();
+        if faces.is_empty() || faces.len() > 256 {
+            return Err(KernelError::Invalid("not supported yet: offsetting this surface".into()));
+        }
+        let mut pts = Vec::new();
+        for face in &faces {
+            for edge in face.absolute_boundaries().iter().flat_map(|w| w.edge_iter()) {
+                pts.push(from_p3(edge.front().point()));
+            }
+        }
+        if let Some(n) = coplanar_normal(&pts) {
+            return crate::transform(body, n * distance, Vec3::ZERO, Vec3::Z, 0.0);
+        }
+        let offs: Vec<Offset> = faces
+            .iter()
+            .map(|f| Offset::of(f).ok_or_else(|| KernelError::Invalid("not supported yet: offsetting this kind of surface".into())))
+            .collect::<Result<_>>()?;
+        if let Some(Offset::Plane { n }) = offs.first().copied() {
+            let n = n.normalized().ok_or_else(|| KernelError::Invalid("the surface has no normal".into()))?;
+            let planar = offs.iter().all(|off| match off {
+                Offset::Plane { n: m } => m.normalized().is_some_and(|u| u.dist(n) < 1e-6 || u.dist(-n) < 1e-6),
+                Offset::Cylinder { .. } => false,
+            });
+            if planar {
+                return crate::transform(body, n * distance, Vec3::ZERO, Vec3::Z, 0.0);
+            }
+        }
+        let tol = body.size() * 1e-4 + 1e-6;
+        let mut vmoved: HashMap<mt::VertexID, mt::Vertex> = HashMap::new();
+        let mut emoved: HashMap<mt::EdgeID, mt::Edge> = HashMap::new();
+        for (f, off) in faces.iter().zip(&offs) {
+            for e in f.absolute_boundaries().iter().flat_map(|w| w.edge_iter()) {
+                let abs = if e.orientation() { e.clone() } else { e.inverse() };
+                for v in [abs.front(), abs.back()] {
+                    let p = map_pt(off, v.point(), distance);
+                    match vmoved.get(&v.id()) {
+                        Some(existing) if existing.point().distance(p) > tol => {
+                            return Err(KernelError::Invalid("not supported yet: offsetting across a sharp edge".into()));
+                        }
+                        Some(_) => {}
+                        None => {
+                            vmoved.insert(v.id(), mt::Vertex::new(p));
+                        }
+                    }
+                }
+                if let std::collections::hash_map::Entry::Vacant(slot) = emoved.entry(abs.id()) {
+                    let (Some(a), Some(b)) = (vmoved.get(&abs.front().id()), vmoved.get(&abs.back().id())) else {
+                        return Err(KernelError::Invalid("offset edge is missing a vertex".into()));
+                    };
+                    slot.insert(mt::Edge::new_unchecked(a, b, map_curve(off, &abs.curve(), distance)?));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (f, off) in faces.iter().zip(&offs) {
+            let wires: Vec<mt::Wire> = f
+                .absolute_boundaries()
+                .iter()
+                .map(|w| {
+                    w.edge_iter()
+                        .filter_map(|e| {
+                            let abs_id = if e.orientation() { e.id() } else { e.inverse().id() };
+                            let m = emoved.get(&abs_id)?.clone();
+                            Some(if e.orientation() { m } else { m.inverse() })
+                        })
+                        .collect::<Vec<_>>()
+                        .into()
+                })
+                .collect();
+            let mut nf = mt::Face::new_unchecked(wires, map_surface(off, &f.surface(), distance)?);
+            if !f.orientation() {
+                nf.invert();
+            }
+            out.push(nf);
+        }
+        Ok(surface_body(out))
     })
 }
 
@@ -1155,6 +1261,21 @@ mod tests {
         let e = extend(&s, &[Vec3::new(10.0, 5.0, 0.0), Vec3::new(5.0, 10.0, 0.0)], 5.0).unwrap();
         assert!(rel(measure(&e).unwrap().area, 225.0) < 1e-9);
         assert!(extend(&s, &[Vec3::new(10.0, 5.0, 0.0)], -1.0).is_err());
+    }
+
+    #[test]
+    fn offset_moves_a_plane_and_refuses_a_sharp_solid() {
+        let b = box_solid(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).unwrap();
+        let s = copy_faces(&b, &[Vec3::new(5.0, 5.0, 10.0)]).unwrap();
+        let before = measure(&s).unwrap();
+        let moved = surface_offset(&s, 2.0).unwrap();
+        let after = measure(&moved).unwrap();
+        let dz = after.bbox.min.z - before.bbox.min.z;
+        assert!((dz.abs() - 2.0).abs() < 1e-4, "before {:?} after {:?}", before.bbox, after.bbox);
+        assert!((after.bbox.min.x - before.bbox.min.x).abs() < 1e-4 && (after.bbox.min.y - before.bbox.min.y).abs() < 1e-4);
+        assert!((after.area - before.area).abs() < 1e-3, "{} {}", before.area, after.area);
+        assert!(surface_offset(&b, 1.0).is_err());
+        assert!(surface_offset(&s, f64::NAN).is_err());
     }
 
     #[test]

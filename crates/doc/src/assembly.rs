@@ -348,6 +348,13 @@ impl FeatureKind {
             | FeatureKind::MeshMergeGroups { .. }
             | FeatureKind::MeshShell { .. }
             | FeatureKind::MeshReverse { .. }
+            | FeatureKind::MoldBox { .. }
+            | FeatureKind::MoldCavity { .. }
+            | FeatureKind::MoldSplit { .. }
+            | FeatureKind::AlignmentPins { .. }
+            | FeatureKind::PourSpout { .. }
+            | FeatureKind::ClearanceGap { .. }
+            | FeatureKind::Nesting { .. }
             | FeatureKind::Form { .. }
             | FeatureKind::BodyTransfer { .. } => {}
             FeatureKind::Patch { edges, .. } | FeatureKind::SurfaceExtend { edges, .. } => edges.iter_mut().for_each(pt),

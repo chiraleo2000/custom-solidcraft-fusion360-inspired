@@ -4556,12 +4556,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let distance = val(vals, distance, Kind::Length)?;
             let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let mb = st.bodies.get(i).cloned().ok_or_else(|| DocError::Invalid("body".into()))?;
-            let faces = mb.body.faces(0.05).map_err(|e| DocError::Invalid(e.to_string()))?;
-            let normal = faces
-                .iter()
-                .find_map(|face| face.plane_normal)
-                .ok_or_else(|| DocError::Invalid("not supported yet: offsetting a non-planar surface".into()))?;
-            let moved = kernel::transform(&mb.body, normal * distance, Vec3::ZERO, Vec3::Z, 0.0)?;
+            let moved = kernel::surface_offset(&mb.body, distance).map_err(|e| DocError::Invalid(e.to_string()))?;
             if let Some(slot) = st.bodies.get_mut(i) {
                 *slot = ModelBody::new(mb.name, moved, f.id);
             }
@@ -4671,6 +4666,177 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let joined = kernel::mesh_combine(&ma.body, &mb.body)?;
             let name = new_name(st, f, 0);
             st.bodies.push(ModelBody::new(name, joined, f.id));
+            Ok(())
+        }
+        FeatureKind::MoldBox { body, margin } => {
+            let m = val(vals, margin, Kind::Length)?;
+            if !(m.is_finite() && (0.0..1.0e5).contains(&m)) {
+                return Err(DocError::Invalid("the mold margin must be zero or a positive length".into()));
+            }
+            let mb = st.bodies.iter().find(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let bb = mb.mesh().bounds();
+            if bb.is_empty() {
+                return Err(DocError::Invalid("the prototype has no size".into()));
+            }
+            let pad = Vec3::new(m, m, m);
+            let boxed = crate::lineage::numbered_tool(kernel::box_solid(bb.min - pad, bb.max + pad)?);
+            let name = unique_body_name(st, f.body_names.first().map(String::as_str).unwrap_or("Mold"));
+            st.bodies.push(ModelBody::traced_new(name, boxed, f.id));
+            Ok(())
+        }
+        FeatureKind::MoldCavity { mold, tool } => {
+            if mold == tool {
+                return Err(DocError::Invalid("the mold and the prototype must be different bodies".into()));
+            }
+            let mold_b = st.body(mold).cloned().ok_or_else(|| DocError::Unknown(format!("body `{mold}`")))?;
+            let tool_b = st.body(tool).cloned().ok_or_else(|| DocError::Unknown(format!("body `{tool}`")))?;
+            let cut =
+                kernel::boolean(&mold_b.body, &tool_b.body, BoolOp::Cut)?.ok_or_else(|| DocError::Invalid("the prototype misses the mold".into()))?;
+            let traced = Traced::step(cut, &[&mold_b.traced(), &tool_b.traced()]);
+            let i = st.bodies.iter().position(|b| &b.name == mold).ok_or_else(|| DocError::Unknown(format!("body `{mold}`")))?;
+            if let Some(slot) = st.bodies.get_mut(i) {
+                *slot = ModelBody::traced_new(mold_b.name, traced, mold_b.feature);
+            }
+            Ok(())
+        }
+        FeatureKind::MoldSplit { body, plane } => {
+            let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Unknown(format!("body `{body}`"))) };
+            let pl = doc.resolve_plane_in(vals, plane, 0, Some(st))?;
+            let parts = kernel::split_by_plane(&mb.body, &pl)?;
+            if parts.len() < 2 {
+                return Err(DocError::Invalid("the plane does not split the mold".into()));
+            }
+            let input = mb.traced();
+            let mut it = parts.into_iter().map(|part| Traced::step(part, &[&input]));
+            if let (Some(first), Some(slot)) = (it.next(), st.bodies.get_mut(i)) {
+                *slot = ModelBody::traced_new(mb.name.clone(), first, mb.feature);
+            }
+            for (k, part) in it.enumerate() {
+                let name = unique_body_name(st, f.body_names.get(k + 1).map(String::as_str).unwrap_or("MoldHalf"));
+                st.bodies.push(ModelBody::traced_new(name, part, f.id));
+            }
+            Ok(())
+        }
+        FeatureKind::AlignmentPins { upper, lower, diameter, depth } => {
+            if upper == lower {
+                return Err(DocError::Invalid("the pin halves must be different bodies".into()));
+            }
+            let diameter = val(vals, diameter, Kind::Length)?;
+            let depth = val(vals, depth, Kind::Length)?;
+            let radius = diameter * 0.5;
+            if !(radius.is_finite() && depth.is_finite()) || radius < 0.05 || depth < 0.05 || radius > 1.0e4 || depth > 1.0e4 {
+                return Err(DocError::Invalid("pin diameter and depth must be usable lengths".into()));
+            }
+            let ub = st.body(upper).cloned().ok_or_else(|| DocError::Unknown(format!("body `{upper}`")))?;
+            let lb = st.body(lower).cloned().ok_or_else(|| DocError::Unknown(format!("body `{lower}`")))?;
+            let bb = ub.mesh().bounds();
+            let inset = radius * 2.0;
+            if bb.is_empty() || bb.max.x - bb.min.x <= inset * 2.0 || bb.max.y - bb.min.y <= inset * 2.0 {
+                return Err(DocError::Invalid("the mold face is smaller than the pins".into()));
+            }
+            let seam = lb.mesh().bounds().max.z;
+            let corners = [
+                (bb.min.x + inset, bb.min.y + inset),
+                (bb.max.x - inset, bb.min.y + inset),
+                (bb.max.x - inset, bb.max.y - inset),
+                (bb.min.x + inset, bb.max.y - inset),
+            ];
+            let mut upper_body = ub.body.clone();
+            let mut lower_body = lb.body.clone();
+            for (x, y) in corners {
+                let pin = kernel::cylinder(Vec3::new(x, y, seam - depth), Vec3::Z, radius, depth * 2.0)?;
+                upper_body =
+                    kernel::boolean(&upper_body, &pin, BoolOp::Union)?.ok_or_else(|| DocError::Invalid("a pin missed the upper mold".into()))?;
+                lower_body =
+                    kernel::boolean(&lower_body, &pin, BoolOp::Cut)?.ok_or_else(|| DocError::Invalid("a pin missed the lower mold".into()))?;
+            }
+            let ui = st.bodies.iter().position(|b| &b.name == upper).ok_or_else(|| DocError::Unknown(format!("body `{upper}`")))?;
+            if let Some(slot) = st.bodies.get_mut(ui) {
+                *slot = ModelBody::traced_new(ub.name.clone(), Traced::step(upper_body, &[&ub.traced()]), ub.feature);
+            }
+            let li = st.bodies.iter().position(|b| &b.name == lower).ok_or_else(|| DocError::Unknown(format!("body `{lower}`")))?;
+            if let Some(slot) = st.bodies.get_mut(li) {
+                let name = lb.name.clone();
+                let feature = lb.feature;
+                *slot = ModelBody::traced_new(name, Traced::step(lower_body, &[&lb.traced()]), feature);
+            }
+            Ok(())
+        }
+        FeatureKind::PourSpout { body, width, depth } => {
+            let width = val(vals, width, Kind::Length)?;
+            let depth = val(vals, depth, Kind::Length)?;
+            if !(width.is_finite() && depth.is_finite()) || width < 0.05 || depth < 0.05 || width > 1.0e4 || depth > 1.0e4 {
+                return Err(DocError::Invalid("the spout width and depth must be usable lengths".into()));
+            }
+            let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let mb = st.bodies.get(i).cloned().ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let bb = mb.mesh().bounds();
+            if bb.is_empty() {
+                return Err(DocError::Invalid("the mold has no size".into()));
+            }
+            let channel = kernel::box_solid(
+                Vec3::new(bb.center().x - width * 0.5, bb.min.y - depth, bb.center().z - width * 0.5),
+                Vec3::new(bb.center().x + width * 0.5, bb.min.y + depth, bb.center().z + width * 0.5),
+            )?;
+            let cut = kernel::boolean(&mb.body, &channel, BoolOp::Cut)?.ok_or_else(|| DocError::Invalid("the spout misses the mold".into()))?;
+            if let Some(slot) = st.bodies.get_mut(i) {
+                let name = mb.name.clone();
+                let feature = mb.feature;
+                *slot = ModelBody::traced_new(name, Traced::step(cut, &[&mb.traced()]), feature);
+            }
+            Ok(())
+        }
+        FeatureKind::ClearanceGap { body, gap } => {
+            let gap = val(vals, gap, Kind::Length)?;
+            if !(gap.is_finite() && gap > 1e-6 && gap < 1.0e4) {
+                return Err(DocError::Invalid("the clearance gap must be a positive length".into()));
+            }
+            let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let mb = st.bodies.get(i).cloned().ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let faces = mb.body.faces(0.05).map_err(|e| DocError::Invalid(e.to_string()))?;
+            if faces.is_empty() || faces.len() > 512 {
+                return Err(DocError::Invalid("not supported yet: clearance on this many faces".into()));
+            }
+            let pts: Vec<Vec3> = faces.iter().map(|face| face.centroid).collect();
+            let shrunk = kernel::offset_faces(&mb.body, &pts, -gap).map_err(|e| DocError::Invalid(e.to_string()))?;
+            if let Some(slot) = st.bodies.get_mut(i) {
+                let name = mb.name.clone();
+                let feature = mb.feature;
+                *slot = ModelBody::traced_new(name, Traced::step(shrunk, &[&mb.traced()]), feature);
+            }
+            Ok(())
+        }
+        FeatureKind::Nesting { bodies, width, depth, gap } => {
+            if bodies.is_empty() || bodies.len() > 256 {
+                return Err(DocError::Invalid("the nest needs 1…256 bodies".into()));
+            }
+            let width = val(vals, width, Kind::Length)?;
+            let depth = val(vals, depth, Kind::Length)?;
+            let gap = val(vals, gap, Kind::Length)?;
+            let mut sizes = Vec::new();
+            let mut mins = Vec::new();
+            for name in bodies {
+                let mb = st.body(name).ok_or_else(|| DocError::Unknown(format!("body `{name}`")))?;
+                let bb = mb.mesh().bounds();
+                if bb.is_empty() {
+                    return Err(DocError::Invalid(format!("`{name}` has no size")));
+                }
+                sizes.push((bb.max.x - bb.min.x, bb.max.y - bb.min.y));
+                mins.push(solidcraft_geom::Vec2::new(bb.min.x, bb.min.y));
+            }
+            let placed = solidcraft_geom::pack_shelf(&sizes, width, depth, gap).map_err(|e| DocError::Invalid(e.into()))?;
+            for ((name, min), place) in bodies.iter().zip(mins).zip(placed) {
+                let i = st.bodies.iter().position(|b| &b.name == name).ok_or_else(|| DocError::Unknown(format!("body `{name}`")))?;
+                let Some(mb) = st.bodies.get(i).cloned() else { continue };
+                let delta = Vec3::new(place.x - min.x, place.y - min.y, 0.0);
+                let moved = kernel::transform(&mb.body, delta, Vec3::ZERO, Vec3::Z, 0.0)?;
+                if let Some(slot) = st.bodies.get_mut(i) {
+                    let name = mb.name.clone();
+                    let feature = mb.feature;
+                    *slot = ModelBody::traced_new(name, Traced::step(moved, &[&mb.traced()]), feature);
+                }
+            }
             Ok(())
         }
         FeatureKind::MeshImport { meshes, .. } => {
