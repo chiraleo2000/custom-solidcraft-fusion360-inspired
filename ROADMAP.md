@@ -44,6 +44,9 @@ RS-274X subset, a 3D board component, and drawing views, parts lists,
 and DXF/PDF export. Open surface extrudes, sheet-metal rips and lofted flanges are in the
 document. Appearance metalness and roughness shade `render.image` and CPU snapshots.
 Still deferred: PCB autorouting, a cloud renderer, and animation video files.
+This fork's `dev` branch carries the stages through electronics: surfaces, form, mesh
+reconstruction, drawings, CAM, mold and DfAM, simulation, presentation, and schematic/PCB
+with a 3D board. PCB autorouting and cloud render stay deferred.
 
 ## Milestones
 

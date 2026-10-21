@@ -259,7 +259,7 @@ pub fn write_drawing_pdf(page_mm: [f64; 2], segs: &[DrawSeg], texts: &[DrawText]
             continue;
         }
         let height = map.scale * if finite(text.height) && text.height > 0.0 { text.height } else { 3.0 };
-        let height = height.max(6.0).min(24.0);
+        let height = height.clamp(6.0, 24.0);
         stream.push_str(&format!("BT /F1 {height:.2} Tf 1 0 0 1 {:.2} {:.2} Tm ({shown}) Tj ET\n", at[0], at[1]));
     }
     let contents = format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len());
