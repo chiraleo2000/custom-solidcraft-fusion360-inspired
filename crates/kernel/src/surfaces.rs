@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use mt::{BoundedCurve, InnerSpace, MetricSpace, ParametricCurve, ParametricSurface3D, SearchNearestParameter};
-use solidcraft_geom::{Plane, Region2, Vec3};
+use solidcraft_geom::{Loop2, Plane, Region2, Vec2, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, from_p3, p3};
@@ -737,6 +737,9 @@ pub fn open_sweep(stations: &[Vec<Vec3>], close_profile: bool, close_path: bool)
     if n < 2 {
         return Err(KernelError::Invalid("an open profile needs at least two points".into()));
     }
+    if close_profile && n < 3 {
+        return Err(KernelError::Invalid("a closed profile needs at least three points".into()));
+    }
     let profile_steps = if close_profile { n } else { n - 1 };
     let path_steps = stations.len() - 1 + usize::from(close_path);
     if profile_steps == 0 || profile_steps.saturating_mul(path_steps) > 20_000 {
@@ -900,22 +903,37 @@ fn open_frames(pts: &[Vec3], tangents: &[Vec3]) -> Option<Vec<[Vec3; 3]>> {
 }
 
 fn unify_stations(stations: &[Vec<Vec3>], closed: bool) -> Result<Vec<Vec<Vec3>>> {
+    let stations: Vec<Vec<Vec3>> = stations.iter().map(|s| dedup_station(s, closed)).collect::<Result<_>>()?;
     let n = stations.iter().map(|s| s.len()).fold(0, usize::max);
     if !(2..=10_000).contains(&n) {
         return Err(KernelError::Invalid("an open profile needs 2…10000 points".into()));
     }
     let target = if stations.iter().all(|s| s.len() == n) { n } else { n.clamp(2, 64) };
-    stations
-        .iter()
-        .map(|s| {
-            for p in s {
-                if !(p.is_finite() && p.x.abs() < 1e7 && p.y.abs() < 1e7 && p.z.abs() < 1e7) {
-                    return Err(KernelError::Invalid("an open surface point is not finite".into()));
-                }
-            }
-            if s.len() == target { Ok(s.clone()) } else { sample_station(s, target, closed) }
-        })
-        .collect()
+    stations.iter().map(|s| if s.len() == target { Ok(s.clone()) } else { sample_station(s, target, closed) }).collect()
+}
+
+/// Drop repeated points. A closed profile that repeats its first point at the end loses that
+/// repeat, so the closing edge is added once.
+fn dedup_station(pts: &[Vec3], closed: bool) -> Result<Vec<Vec3>> {
+    if pts.len() > 10_000 {
+        return Err(KernelError::Invalid("an open profile needs 2…10000 points".into()));
+    }
+    let mut out = Vec::with_capacity(pts.len());
+    for p in pts {
+        if !(p.is_finite() && p.x.abs() < 1e7 && p.y.abs() < 1e7 && p.z.abs() < 1e7) {
+            return Err(KernelError::Invalid("an open surface point is not finite".into()));
+        }
+        if out.last().is_none_or(|last: &Vec3| last.dist(*p) > 1e-9) {
+            out.push(*p);
+        }
+    }
+    if closed && out.len() >= 2 && out.first().zip(out.last()).is_some_and(|(a, b)| a.dist(*b) <= 1e-6) {
+        out.pop();
+    }
+    if out.len() < 2 {
+        return Err(KernelError::Invalid("an open profile needs at least two points".into()));
+    }
+    Ok(out)
 }
 
 fn sample_station(pts: &[Vec3], n: usize, closed: bool) -> Result<Vec<Vec3>> {
@@ -999,8 +1017,90 @@ fn planar_loop(pts: &[Vec3]) -> Result<mt::Face> {
 }
 
 /// One face on a closed polyline. Planar input keeps the shoelace area. A guide whose ends
-/// meet the boundary splits it into two ruled sheets; a guide that misses is refused.
+/// meet the boundary (including the middle of an edge) splits it into two ruled sheets; a
+/// guide that misses, or that leaves a planar boundary, is refused when it does not lie in
+/// that plane — a coplanar guide keeps the polygon's area.
 pub fn patch_guided(boundary: &[Vec3], guide: Option<&[Vec3]>) -> Result<Body> {
+    let loop_pts = clean_boundary(boundary)?;
+    let Some(guide) = guide.filter(|g| !g.is_empty()) else {
+        return patch_polygon(&loop_pts);
+    };
+    guide_sheet(&loop_pts, guide)
+}
+
+/// A sketch loop (`outer`) plus edge picks (`extras`). Picks that lie on `outer` confirm that
+/// loop. Picks that form one coplanar hole inside it become that hole, and the face area is
+/// the polygon minus the hole. Anything else is `not supported yet`.
+pub fn patch_mixed(outer: &[Vec3], extras: &[Vec3], guide: Option<&[Vec3]>) -> Result<Body> {
+    if extras.is_empty() {
+        return patch_guided(outer, guide);
+    }
+    if extras.len() > 10_000 || extras.iter().any(|p| !(p.is_finite() && p.x.abs() < 1e7 && p.y.abs() < 1e7 && p.z.abs() < 1e7)) {
+        return Err(KernelError::Invalid("a patch point is not finite".into()));
+    }
+    let loop_pts = clean_boundary(outer)?;
+    let size = loop_pts.iter().fold(0.0_f64, |s, p| s.max(p.len()));
+    let tol = (size * 1e-4).max(1e-3);
+    if extras.iter().all(|p| dist_to_loop(&loop_pts, *p) <= tol) {
+        return patch_guided(&loop_pts, guide);
+    }
+    if guide.is_some_and(|g| !g.is_empty()) {
+        return Err(KernelError::Invalid("not supported yet: a guide curve on a patch with a hole".into()));
+    }
+    let hole = clean_boundary(extras)?;
+    let Some(plane) = polygon_plane(&loop_pts) else {
+        return Err(KernelError::Invalid("not supported yet: a patch boundary that is not planar".into()));
+    };
+    if loop_pts.iter().chain(hole.iter()).any(|p| plane.height(*p).abs() > 1e-3) {
+        return Err(KernelError::Invalid("not supported yet: a patch boundary that is not planar".into()));
+    }
+    if !hole_inside(&plane, &loop_pts, &hole) {
+        return Err(KernelError::Invalid("not supported yet: mixed edge and sketch boundaries that do not form one loop or one hole".into()));
+    }
+    patch_with_hole(&plane, &loop_pts, &hole)
+}
+
+fn guide_sheet(loop_pts: &[Vec3], guide: &[Vec3]) -> Result<Body> {
+    validate_guide(guide)?;
+    let (Some(&g0), Some(&g1)) = (guide.first(), guide.last()) else {
+        return Err(KernelError::Invalid("a guide curve needs two ends".into()));
+    };
+    let size = loop_pts.iter().fold(0.0_f64, |s, p| s.max(p.len()));
+    let tol = (size * 1e-6).max(1e-4);
+    let h0 = project_onto_loop(loop_pts, g0, tol)?;
+    let h1 = project_onto_loop(loop_pts, g1, tol)?;
+    if h0.point.dist(h1.point) <= 1e-6 {
+        return Err(KernelError::Invalid("the guide meets the boundary at one point".into()));
+    }
+    if let Some(plane) = polygon_plane(loop_pts)
+        && loop_pts.iter().all(|p| plane.height(*p).abs() < 1e-3)
+        && guide.iter().all(|p| plane.height(*p).abs() < 1e-3)
+    {
+        return patch_polygon(loop_pts);
+    }
+    let (loop_pts, i, j) = insert_hits(loop_pts, h0, h1)?;
+    let mut snapped = guide.to_vec();
+    if let (Some(first), Some(start)) = (snapped.first_mut(), loop_pts.get(i)) {
+        *first = *start;
+    }
+    if let (Some(last), Some(end)) = (snapped.last_mut(), loop_pts.get(j)) {
+        *last = *end;
+    }
+    let a = chain_between(&loop_pts, i, j);
+    let b = chain_between(&loop_pts, j, i);
+    if a.len() < 2 || b.len() < 2 {
+        return Err(KernelError::Invalid("the guide meets the boundary at one point".into()));
+    }
+    let mut back = snapped.clone();
+    back.reverse();
+    let (chain_a, guide_a) = rail_pair(&a, &snapped)?;
+    let (chain_b, guide_b) = rail_pair(&b, &back)?;
+    let left = open_sweep(&[chain_a, guide_a], false, false)?;
+    let right = open_sweep(&[chain_b, guide_b], false, false)?;
+    stitch(&[&left, &right], 0.0)
+}
+
+fn clean_boundary(boundary: &[Vec3]) -> Result<Vec<Vec3>> {
     if boundary.len() < 3 || boundary.len() > 10_000 {
         return Err(KernelError::Invalid("a patch boundary does not close".into()));
     }
@@ -1010,42 +1110,187 @@ pub fn patch_guided(boundary: &[Vec3], guide: Option<&[Vec3]>) -> Result<Body> {
         }
     }
     let mut loop_pts = boundary.to_vec();
-    let closed = loop_pts.first().zip(loop_pts.last()).is_some_and(|(a, b)| a.dist(*b) < 1e-4);
-    if closed {
+    if loop_pts.first().zip(loop_pts.last()).is_some_and(|(a, b)| a.dist(*b) < 1e-4) {
         loop_pts.pop();
     }
     if loop_pts.len() < 3 {
         return Err(KernelError::Invalid("a patch boundary does not close".into()));
     }
-    let Some(guide) = guide.filter(|g| !g.is_empty()) else {
-        return patch_polygon(&loop_pts);
-    };
-    if guide.len() < 2 || guide.len() > 10_000 || guide.iter().any(|p| !p.is_finite()) {
+    Ok(loop_pts)
+}
+
+fn validate_guide(guide: &[Vec3]) -> Result<()> {
+    if guide.len() < 2 || guide.len() > 10_000 || guide.iter().any(|p| !(p.is_finite() && p.x.abs() < 1e7 && p.y.abs() < 1e7 && p.z.abs() < 1e7)) {
         return Err(KernelError::Invalid("a guide curve needs 2…10000 finite points".into()));
     }
-    let size = loop_pts.iter().fold(0.0_f64, |s, p| s.max(p.len()));
-    let tol = (size * 0.05).max(0.5);
-    let (Some(&g0), Some(&g1)) = (guide.first(), guide.last()) else {
-        return Err(KernelError::Invalid("a guide curve needs two ends".into()));
-    };
-    if dist_to_loop(&loop_pts, g0) > tol || dist_to_loop(&loop_pts, g1) > tol {
-        return Err(KernelError::Invalid("the guide does not meet the boundary".into()));
+    Ok(())
+}
+
+/// Sample both rails at every vertex of either, so a boundary corner and a guide ridge stay put.
+fn rail_pair(chain: &[Vec3], guide: &[Vec3]) -> Result<(Vec<Vec3>, Vec<Vec3>)> {
+    let mut params = arc_fractions(chain)?;
+    for t in arc_fractions(guide)? {
+        if params.iter().all(|u| (u - t).abs() > 1e-4) {
+            params.push(t);
+        }
     }
-    if let Some(plane) = polygon_plane(&loop_pts)
-        && guide.iter().all(|p| plane.height(*p).abs() < 1e-3)
-    {
-        return patch_polygon(&loop_pts);
+    params.sort_by(|a, b| a.total_cmp(b));
+    if params.len() > 64 {
+        let mut slim = vec![0.0];
+        for i in 1..63 {
+            slim.push(i as f64 / 63.0);
+        }
+        slim.push(1.0);
+        params = slim;
     }
-    let i = nearest_index(&loop_pts, g0);
-    let j = nearest_index(&loop_pts, g1);
-    if i == j {
+    let chain_s = params.iter().map(|t| point_at_fraction(chain, *t)).collect::<Result<Vec<_>>>()?;
+    let guide_s = params.iter().map(|t| point_at_fraction(guide, *t)).collect::<Result<Vec<_>>>()?;
+    Ok((chain_s, guide_s))
+}
+
+fn arc_fractions(pts: &[Vec3]) -> Result<Vec<f64>> {
+    let total = polyline_length(pts)?;
+    let mut out = vec![0.0];
+    let mut acc = 0.0;
+    for w in pts.windows(2) {
+        let (Some(a), Some(b)) = (w.first(), w.get(1)) else { continue };
+        acc += a.dist(*b);
+        out.push(acc / total);
+    }
+    if let Some(last) = out.last_mut() {
+        *last = 1.0;
+    }
+    Ok(out)
+}
+
+fn polyline_length(pts: &[Vec3]) -> Result<f64> {
+    let mut total = 0.0;
+    for w in pts.windows(2) {
+        let (Some(a), Some(b)) = (w.first(), w.get(1)) else { continue };
+        total += a.dist(*b);
+    }
+    if total < 1e-9 { Err(KernelError::Invalid("the open profile has no length".into())) } else { Ok(total) }
+}
+
+fn point_at_fraction(pts: &[Vec3], t: f64) -> Result<Vec3> {
+    if t <= 1e-12 {
+        return pts.first().copied().ok_or_else(|| KernelError::Invalid("open surface point".into()));
+    }
+    if t >= 1.0 - 1e-12 {
+        return pts.last().copied().ok_or_else(|| KernelError::Invalid("open surface point".into()));
+    }
+    let total = polyline_length(pts)?;
+    let target = total * t;
+    let mut acc = 0.0;
+    for w in pts.windows(2) {
+        let (Some(a), Some(b)) = (w.first(), w.get(1)) else { continue };
+        let seg = a.dist(*b);
+        if acc + seg >= target - 1e-9 {
+            let u = if seg > 1e-12 { ((target - acc) / seg).clamp(0.0, 1.0) } else { 0.0 };
+            return Ok(*a * (1.0 - u) + *b * u);
+        }
+        acc += seg;
+    }
+    pts.last().copied().ok_or_else(|| KernelError::Invalid("open surface point".into()))
+}
+
+struct LoopHit {
+    seg: usize,
+    t: f64,
+    point: Vec3,
+}
+
+fn project_onto_loop(pts: &[Vec3], p: Vec3, tol: f64) -> Result<LoopHit> {
+    let n = pts.len();
+    let mut best: Option<(f64, LoopHit)> = None;
+    for i in 0..n {
+        let (Some(a), Some(b)) = (pts.get(i), pts.get((i + 1) % n.max(1))) else { continue };
+        let d = *b - *a;
+        let dd = d.dot(d);
+        let t = if dd > 1e-18 { ((p - *a).dot(d) / dd).clamp(0.0, 1.0) } else { 0.0 };
+        let q = *a + d * t;
+        let dist = q.dist(p);
+        if best.as_ref().is_none_or(|(bd, _)| dist < *bd) {
+            best = Some((dist, LoopHit { seg: i, t, point: q }));
+        }
+    }
+    match best {
+        Some((dist, hit)) if dist <= tol => Ok(hit),
+        _ => Err(KernelError::Invalid("the guide does not meet the boundary".into())),
+    }
+}
+
+fn on_vertex(hit: &LoopHit, n: usize) -> Option<usize> {
+    if n == 0 {
+        return None;
+    }
+    if hit.t <= 1e-8 {
+        Some(hit.seg % n)
+    } else if hit.t >= 1.0 - 1e-8 {
+        Some((hit.seg + 1) % n)
+    } else {
+        None
+    }
+}
+
+fn insert_hits(pts: &[Vec3], h0: LoopHit, h1: LoopHit) -> Result<(Vec<Vec3>, usize, usize)> {
+    let n = pts.len();
+    if n < 3 {
+        return Err(KernelError::Invalid("a patch boundary does not close".into()));
+    }
+    let mut extra = Vec::new();
+    if on_vertex(&h0, n).is_none() {
+        extra.push((h0.seg, h0.t, h0.point));
+    }
+    if on_vertex(&h1, n).is_none() && h1.point.dist(h0.point) > 1e-8 {
+        extra.push((h1.seg, h1.t, h1.point));
+    }
+    extra.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)));
+    let mut out = pts.to_vec();
+    for (seg, _, p) in extra {
+        let at = seg.saturating_add(1);
+        if at > out.len() {
+            return Err(KernelError::Invalid("a patch boundary does not close".into()));
+        }
+        out.insert(at, p);
+    }
+    let i = nearest_index(&out, h0.point);
+    let j = nearest_index(&out, h1.point);
+    if i == j || out.get(i).is_none_or(|p| p.dist(h0.point) > 1e-4) || out.get(j).is_none_or(|p| p.dist(h1.point) > 1e-4) {
         return Err(KernelError::Invalid("the guide meets the boundary at one point".into()));
     }
-    let a = chain_between(&loop_pts, i, j);
-    let b = chain_between(&loop_pts, j, i);
-    let left = open_sweep(&[a, guide.to_vec()], false, false)?;
-    let right = open_sweep(&[b, guide.to_vec()], false, false)?;
-    stitch(&[&left, &right], 0.0)
+    Ok((out, i, j))
+}
+
+fn hole_inside(plane: &Plane, outer: &[Vec3], hole: &[Vec3]) -> bool {
+    let local: Vec<Vec2> = hole.iter().map(|p| plane.to_local(*p)).collect();
+    if local.is_empty() {
+        return false;
+    }
+    let c = local.iter().copied().fold(Vec2::ZERO, |s, p| s + p) * (1.0 / local.len() as f64);
+    let outer_l: Vec<Vec2> = outer.iter().map(|p| plane.to_local(*p)).collect();
+    point_in_poly(&outer_l, c)
+}
+
+fn point_in_poly(poly: &[Vec2], p: Vec2) -> bool {
+    let n = poly.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (Some(a), Some(b)) = (poly.get(i), poly.get((i + 1) % n.max(1))) else { continue };
+        let crosses = (a.y > p.y) != (b.y > p.y);
+        let x = if (b.y - a.y).abs() > 1e-18 { (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x } else { a.x };
+        if crosses && p.x < x {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+fn patch_with_hole(plane: &Plane, outer: &[Vec3], hole: &[Vec3]) -> Result<Body> {
+    let outer_l: Vec<Vec2> = outer.iter().map(|p| plane.to_local(*p)).collect();
+    let hole_l: Vec<Vec2> = hole.iter().map(|p| plane.to_local(*p)).collect();
+    let region = Region2 { outer: Loop2::polygon(&outer_l).ccw(), holes: vec![Loop2::polygon(&hole_l).ccw().reversed()] };
+    patch_region(plane, &region)
 }
 
 fn patch_polygon(pts: &[Vec3]) -> Result<Body> {
@@ -1109,39 +1354,7 @@ fn dist_to_seg(a: Vec3, b: Vec3, p: Vec3) -> f64 {
 
 /// Midpoints of edges that belong to only one face. Empty when the body is closed.
 pub fn gap_points(body: &Body) -> Result<Vec<Vec3>> {
-    if !body.is_surface() {
-        return Ok(Vec::new());
-    }
-    body.require_brep("stitch gaps")?;
-    guard("stitch gaps", || {
-        let mut counts: HashMap<mt::EdgeID, (mt::Edge, usize)> = HashMap::new();
-        let mut seen = 0usize;
-        for face in body.solid.face_iter() {
-            for edge in face.edge_iter() {
-                seen += 1;
-                if seen > 80_000 {
-                    return Err(KernelError::Invalid("too many edges to report gaps".into()));
-                }
-                counts.entry(edge.id()).and_modify(|(_, n)| *n += 1).or_insert((edge, 1));
-            }
-        }
-        let mut out = Vec::new();
-        for (edge, n) in counts.values() {
-            if *n != 1 {
-                continue;
-            }
-            let curve = edge.curve();
-            let (t0, t1) = curve.range_tuple();
-            let mid = from_p3(curve.subs(t0 + (t1 - t0) * 0.5));
-            if mid.is_finite() {
-                out.push(mid);
-            }
-            if out.len() > 10_000 {
-                return Err(KernelError::Invalid("too many gap edges".into()));
-            }
-        }
-        Ok(out)
-    })
+    Ok(crate::sew::gap_edges(body)?.into_iter().map(|edge| edge.mid).collect())
 }
 
 /// Reverse every face so the next thicken steps the other way.
@@ -1303,5 +1516,177 @@ mod tests {
         assert!(rel(measure(&t).unwrap().area, 30.0) < 1e-9);
         let t = trim(&s, &crate::SplitTool::Plane(pl), Vec3::new(8.0, 5.0, 0.0)).unwrap();
         assert!(rel(measure(&t).unwrap().area, 70.0) < 1e-9);
+        let tool = box_solid(Vec3::new(3.0, -1.0, -2.0), Vec3::new(1.0, 12.0, 4.0)).unwrap();
+        let face = tool
+            .solid
+            .face_iter()
+            .position(|f| {
+                let pts: Vec<Vec3> = f.edge_iter().map(|e| from_p3(e.front().point())).collect();
+                pts.len() >= 3 && pts.iter().all(|p| (p.x - 3.0).abs() < 1e-6)
+            })
+            .unwrap();
+        let cut = trim(&s, &crate::SplitTool::Face { body: &tool, face }, Vec3::new(1.0, 5.0, 0.0)).unwrap();
+        let kept = measure(&cut).unwrap().area;
+        let other = trim(&s, &crate::SplitTool::Face { body: &tool, face }, Vec3::new(8.0, 5.0, 0.0)).unwrap();
+        let rest = measure(&other).unwrap().area;
+        assert!(rel(kept + rest, 100.0) < 1e-6, "{kept} + {rest}");
+        assert!((kept - rest).abs() > 10.0, "the face tool keeps one side");
+    }
+
+    /// Feature: fusion360-feature-parity, Property 3: Surface-create yields a zero-thickness surface
+    #[test]
+    fn open_sweep_sheets_have_no_volume() {
+        for i in 0..100 {
+            let len = 1.0 + (i % 17) as f64;
+            let h = 0.5 + (i % 13) as f64 * 0.3;
+            let a = vec![Vec3::ZERO, Vec3::new(len, 0.0, 0.0)];
+            let b = vec![Vec3::new(0.0, 0.0, h), Vec3::new(len, 0.0, h)];
+            let sheet = open_sweep(&[a, b], false, false).unwrap();
+            assert!(sheet.is_surface());
+            let m = measure(&sheet).unwrap();
+            assert!(m.volume.abs() < 1e-4, "{i} {}", m.volume);
+            assert!((m.area - len * h).abs() < 1e-3 * len * h, "{i} {} vs {}", m.area, len * h);
+        }
+        let square = vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 8.0, 0.0), Vec3::new(0.0, 8.0, 0.0)];
+        let raised: Vec<Vec3> = square.iter().map(|p| *p + Vec3::new(0.0, 0.0, 6.0)).collect();
+        let mut repeated = square.clone();
+        repeated.push(Vec3::ZERO);
+        let tube = open_sweep(&[repeated, raised.clone()], true, false).unwrap();
+        assert!(tube.is_surface(), "a closed profile extrude has no caps");
+        assert_eq!(tube.face_count(), 4);
+        let m = measure(&tube).unwrap();
+        assert!((m.area - 36.0 * 6.0).abs() < 1e-2, "area {} faces {}", m.area, tube.face_count());
+        assert!(open_sweep(&[square, raised], true, false).is_ok());
+    }
+
+    /// Feature: fusion360-feature-parity, Property 4: Planar patch area equals the enclosed area
+    #[test]
+    fn planar_patch_area_matches_the_polygon() {
+        for n in 3..8 {
+            for k in 0..20 {
+                let r = 2.0 + (k % 7) as f64;
+                let phase = k as f64 * 0.17;
+                let pts: Vec<Vec3> = (0..n)
+                    .map(|i| {
+                        let a = phase + i as f64 * std::f64::consts::TAU / n as f64;
+                        Vec3::new(r * a.cos(), r * a.sin(), 0.0)
+                    })
+                    .collect();
+                let want = 0.5 * n as f64 * r * r * (std::f64::consts::TAU / n as f64).sin();
+                let sheet = patch_guided(&pts, None).unwrap();
+                assert!(sheet.is_surface());
+                let area = measure(&sheet).unwrap().area;
+                assert!(rel(area, want) < 1e-6, "n={n} k={k} {area} vs {want}");
+                let chord = vec![pts[0], pts[n / 2]];
+                let guided = patch_guided(&pts, Some(&chord)).unwrap();
+                assert!(rel(measure(&guided).unwrap().area, want) < 1e-6, "guide n={n}");
+            }
+        }
+        let outer = vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 10.0, 0.0), Vec3::new(0.0, 10.0, 0.0)];
+        let hole = vec![Vec3::new(2.0, 2.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::new(4.0, 4.0, 0.0), Vec3::new(2.0, 4.0, 0.0)];
+        let with_hole = patch_mixed(&outer, &hole, None).unwrap();
+        assert!(rel(measure(&with_hole).unwrap().area, 96.0) < 1e-6);
+        let on_loop = patch_mixed(&outer, &[Vec3::new(5.0, 0.0, 0.0), Vec3::new(10.0, 5.0, 0.0)], None).unwrap();
+        assert!(rel(measure(&on_loop).unwrap().area, 100.0) < 1e-6);
+        let err = patch_mixed(&outer, &[Vec3::new(30.0, 30.0, 0.0), Vec3::new(32.0, 30.0, 0.0), Vec3::new(31.0, 32.0, 0.0)], None).unwrap_err();
+        assert!(err.to_string().contains("not supported yet"), "{err}");
+    }
+
+    #[test]
+    fn a_guide_that_meets_an_edge_lifts_the_patch() {
+        let outer = vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 10.0, 0.0), Vec3::new(0.0, 10.0, 0.0)];
+        let guide = vec![Vec3::new(0.0, 5.0, 0.0), Vec3::new(5.0, 5.0, 2.0), Vec3::new(10.0, 5.0, 0.0)];
+        let sheet = patch_guided(&outer, Some(&guide)).unwrap();
+        assert!(sheet.is_surface());
+        let m = measure(&sheet).unwrap();
+        assert!(m.bbox.max.z > 1.5, "{:?}", m.bbox);
+        assert!(m.area > 100.0, "area {} faces {} bbox {:?}", m.area, sheet.face_count(), m.bbox);
+        let gaps = gap_points(&sheet).unwrap();
+        assert!(gaps.iter().all(|p| p.dist(Vec3::new(5.0, 5.0, 2.0)) > 0.4), "the guide is not a gap: {gaps:?}");
+        assert!(patch_guided(&outer, Some(&[Vec3::new(5.0, 5.0, 4.0), Vec3::new(6.0, 5.0, 4.0)])).is_err());
+    }
+
+    /// Feature: fusion360-feature-parity, Property 5: Trim then the other side restores the area
+    #[test]
+    fn trim_sides_sum_to_the_sheet() {
+        let r = Region2 {
+            outer: Loop2::polygon(&[Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0), Vec2::new(0.0, 10.0)]),
+            holes: vec![],
+        };
+        let s = patch_region(&Plane::XY, &r).unwrap();
+        for i in 0..100 {
+            let x = 0.5 + (i % 19) as f64 * 0.45;
+            let pl = Plane::new(Vec3::new(x, 0.0, 0.0), Vec3::Y, Vec3::Z).unwrap();
+            let a = measure(&trim(&s, &crate::SplitTool::Plane(pl), Vec3::new(0.0, 5.0, 0.0)).unwrap()).unwrap().area;
+            let b = measure(&trim(&s, &crate::SplitTool::Plane(pl), Vec3::new(10.0, 5.0, 0.0)).unwrap()).unwrap().area;
+            assert!(rel(a + b, 100.0) < 1e-6, "{i} {a}+{b}");
+        }
+    }
+
+    /// Feature: fusion360-feature-parity, Property 6: Stitch closes to a solid exactly when faces bound a volume
+    #[test]
+    fn stitch_closes_only_a_full_box() {
+        for k in 0..20 {
+            let s = 1.0 + k as f64;
+            let b = box_solid(Vec3::ZERO, Vec3::new(s, 2.0 * s, 3.0 * s)).unwrap();
+            let pts = [
+                Vec3::new(s * 0.5, s, 0.0),
+                Vec3::new(s * 0.5, s, 3.0 * s),
+                Vec3::new(0.0, s, 1.5 * s),
+                Vec3::new(s, s, 1.5 * s),
+                Vec3::new(s * 0.5, 0.0, 1.5 * s),
+                Vec3::new(s * 0.5, 2.0 * s, 1.5 * s),
+            ];
+            let parts: Vec<Body> = pts.iter().map(|p| copy_faces(&b, &[*p]).unwrap()).collect();
+            for n in 1..=6 {
+                let sewn = crate::sew::stitch_tolerant(&parts[..n], 0.0).unwrap();
+                assert_eq!(sewn.closed, n == 6, "k={k} n={n}");
+                assert_eq!(sewn.gaps.is_empty(), n == 6);
+                assert_eq!(!sewn.body.is_surface(), n == 6);
+                if n == 6 {
+                    assert!(rel(measure(&sewn.body).unwrap().volume, s * 2.0 * s * 3.0 * s) < 1e-6);
+                } else {
+                    assert!(!gap_points(&sewn.body).unwrap().is_empty());
+                }
+            }
+        }
+    }
+
+    /// Feature: fusion360-feature-parity, Property 7: Thicken volume equals area times thickness
+    #[test]
+    fn thicken_volume_is_area_times_thickness() {
+        let sheets = {
+            let plane = patch_region(
+                &Plane::XY,
+                &Region2 { outer: Loop2::polygon(&[Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(10.0, 4.0), Vec2::new(0.0, 4.0)]), holes: vec![] },
+            )
+            .unwrap();
+            let cyl = cylinder(Vec3::ZERO, Vec3::Z, 10.0, 20.0).unwrap();
+            let side = copy_faces(&cyl, &[Vec3::new(7.0, 7.0, 10.0)]).unwrap();
+            crate::offset::thicken_bodies(&[&plane, &side], 1.0, false).unwrap()
+        };
+        assert_eq!(sheets.len(), 2);
+        assert!(sheets.iter().all(|b| !b.is_surface()));
+        let plane_v = measure(sheets.first().unwrap()).unwrap().volume.abs();
+        assert!(rel(plane_v, 40.0) < 1e-6, "{plane_v}");
+        for i in 0..100 {
+            let w = 1.0 + (i % 11) as f64;
+            let h = 1.0 + (i % 7) as f64;
+            let t = 0.2 + (i % 5) as f64 * 0.3;
+            let sheet = patch_region(
+                &Plane::XY,
+                &Region2 { outer: Loop2::polygon(&[Vec2::ZERO, Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)]), holes: vec![] },
+            )
+            .unwrap();
+            let area = measure(&sheet).unwrap().area;
+            let solid = thicken(&sheet, t, false).unwrap();
+            assert!(!solid.is_surface());
+            let volume = measure(&solid).unwrap().volume.abs();
+            assert!(rel(volume, area * t) < 1e-6, "{i} {volume} vs {}", area * t);
+        }
+        let sharp = box_solid(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0)).unwrap();
+        let err = thicken(&sharp, 1.0, false).unwrap_err().to_string();
+        assert!(err.contains("not supported yet"), "{err}");
+        assert!(crate::offset::thicken_bodies(&[], 1.0, false).is_err());
     }
 }

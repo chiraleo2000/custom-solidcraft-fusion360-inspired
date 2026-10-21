@@ -1369,3 +1369,20 @@ pub fn with_same_surface(b: &Body, chosen: &[usize]) -> Vec<usize> {
     }
     out
 }
+
+/// Thicken each surface body by `thickness` (or half each way when `symmetric`).
+/// Planar faces and circular cylinders only; a sharp corner or any other surface is
+/// `not supported yet`. One failure refuses the whole set.
+pub fn thicken_bodies(bodies: &[&Body], thickness: f64, symmetric: bool) -> Result<Vec<Body>> {
+    if bodies.is_empty() || bodies.len() > 256 {
+        return Err(KernelError::Invalid("pick the surfaces to thicken".into()));
+    }
+    if !(thickness.is_finite() && thickness.abs() > 1e-9 && thickness.abs() < 1.0e6) {
+        return Err(KernelError::Invalid("thickness must be non-zero".into()));
+    }
+    let mut out = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        out.push(crate::surfaces::thicken(body, thickness, symmetric)?);
+    }
+    Ok(out)
+}

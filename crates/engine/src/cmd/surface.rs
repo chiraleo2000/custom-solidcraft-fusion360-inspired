@@ -13,15 +13,15 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("surface.patch", "Patch", patch)
         .at("SURFACE", "CREATE")
         .icon("patch")
-        .params("sketch?: id|name and profiles? (planar patches of sketch regions) | edges: [[x,y,z]] (points on a closed loop of a body's edges: one face on them, planar when the loop is, else a smooth B-spline surface) and body?; name?, body_name?"),
+        .params("sketch?: id|name and profiles? (planar patches of sketch regions) | edges: [[x,y,z]] (points on a closed loop of a body's edges, or picks on the sketch loop) and body?; guide?: [[x,y,z]] (a curve whose ends meet the boundary; coplanar keeps the polygon area); name?, body_name?"),
     CommandSpec::new("surface.stitch", "Stitch", stitch)
         .at("SURFACE", "MODIFY")
         .icon("stitch")
-        .params("bodies: [names] (surfaces sewn into the first; a solid when they close); tolerance?: expr (default: tight)"),
+        .params("bodies: [names] (surfaces sewn into the first; a solid when they close, otherwise a joined surface); tolerance?: expr (edges within it are welded). The result lists gap edges that stayed open"),
     CommandSpec::new("surface.thicken", "Thicken", thicken)
         .at("SURFACE", "CREATE")
         .icon("thicken")
-        .params("bodies: [surface names]; thickness: expr (negative: against the normal); symmetric?: bool; operation?: new|join|cut|intersect; targets?"),
+        .params("bodies: [surface names] (several bodies, each a plane or a circular cylinder); thickness: expr (negative: against the normal); symmetric?: bool; operation?: new|join|cut|intersect; targets?. A sharp edge or any other surface is not supported yet"),
     CommandSpec::new("surface.extend", "Extend", extend)
         .at("SURFACE", "MODIFY")
         .icon("extend")
@@ -29,23 +29,23 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("surface.trim", "Trim", trim)
         .at("SURFACE", "MODIFY")
         .icon("trim")
-        .params("body: surface name; plane: XY|XZ|YZ|plane name|{origin, normal} or tool: {body, point} (a face, its surface extended); keep: [x,y,z] (a point on the side to keep)"),
+        .params("body: surface name; plane: XY|XZ|YZ|plane name|{origin, normal} or tool: {body, point} (a face, its surface extended) or sketch + curve (a line; other curves are not supported yet); keep: [x,y,z] (a point on the side to keep)"),
     CommandSpec::new("surface.extrude", "Extrude Surface", extrude_surface)
         .at("SURFACE", "CREATE")
         .icon("extrude")
-        .params("same as solid.extrude; the side walls are kept as a zero-thickness surface. axis?: [x,y,z] (default Z)"),
+        .params("same as solid.extrude, as a zero-thickness open body with no caps (open profiles allowed). taper, through_all, to/from and join/cut/intersect are not supported yet"),
     CommandSpec::new("surface.revolve", "Revolve Surface", revolve_surface)
         .at("SURFACE", "CREATE")
         .icon("revolve")
-        .params("same as solid.revolve; side faces become a surface. axis_dir?: [x,y,z] (default Z, used only to drop the caps)"),
+        .params("same as solid.revolve, as a zero-thickness open body with no caps. to, angle2 and join/cut/intersect are not supported yet"),
     CommandSpec::new("surface.sweep", "Sweep Surface", sweep_surface)
         .at("SURFACE", "CREATE")
         .icon("sweep")
-        .params("same as solid.sweep; side faces become a surface"),
+        .params("same as solid.sweep, as a zero-thickness open body with no caps. join/cut/intersect and a self-crossing path are not supported yet"),
     CommandSpec::new("surface.loft", "Loft Surface", loft_surface)
         .at("SURFACE", "CREATE")
         .icon("loft")
-        .params("same as solid.loft; side faces become a surface"),
+        .params("same as solid.loft, as a zero-thickness open body with no caps. guide rails and join/cut/intersect are not supported yet"),
     CommandSpec::new("surface.untrim", "Untrim", untrim)
         .at("SURFACE", "MODIFY")
         .icon("trim")
@@ -110,12 +110,20 @@ fn stitch(s: &mut Session, p: &Value) -> Result<Value> {
     check_expr(s, &tolerance, Kind::Length, cmd, "tolerance")?;
     let made = add_feature(s, p, FeatureKind::Stitch { bodies: bodies.clone(), tolerance })?;
     let st = s.model.state();
-    let gaps =
-        st.body(bodies.first().map(String::as_str).unwrap_or("")).and_then(|b| solidcraft_kernel::gap_points(&b.body).ok()).unwrap_or_default();
+    let slot = st.body(bodies.first().map(String::as_str).unwrap_or(""));
+    let closed = slot.is_some_and(|b| !b.body.is_surface());
+    let gaps = slot.and_then(|b| solidcraft_kernel::gap_edges(&b.body).ok()).unwrap_or_default();
     let mut made = made;
     if let Some(obj) = made.as_object_mut() {
-        obj.insert("gaps".into(), serde_json::json!(gaps.iter().map(|g| [g.x, g.y, g.z]).collect::<Vec<_>>()));
-        obj.insert("closed".into(), serde_json::json!(gaps.is_empty()));
+        let point = |p: solidcraft_geom::Vec3| [p.x, p.y, p.z];
+        obj.insert("gaps".into(), serde_json::json!(gaps.iter().map(|g| point(g.mid)).collect::<Vec<_>>()));
+        obj.insert(
+            "gap_edges".into(),
+            serde_json::json!(
+                gaps.iter().map(|g| serde_json::json!({"start": point(g.start), "end": point(g.end), "mid": point(g.mid)})).collect::<Vec<_>>()
+            ),
+        );
+        obj.insert("closed".into(), serde_json::json!(closed));
     }
     Ok(made)
 }
@@ -160,10 +168,19 @@ fn trim(s: &mut Session, p: &Value) -> Result<Value> {
     let (curve_sketch, curve) = match str_(p, "curve") {
         Some(id) if !id.is_empty() => {
             let sk = super::features::sketch_id(s, p.get("sketch").or_else(|| p.get("curve_sketch")), cmd, "sketch")?;
+            let sketch = s.doc.sketch(sk).map_err(|e| bad(cmd, e.to_string()))?;
+            let found = sketch.curves.iter().find(|c| c.id == id).ok_or_else(|| bad(cmd, format!("no curve `{id}`")))?;
+            if !matches!(found.kind, solidcraft_sketch::CurveKind::Line { .. }) {
+                return Err(bad(cmd, "not supported yet: trimming with a curve that is not a line"));
+            }
             (Some(sk), Some(id.to_string()))
         }
         _ => (None, None),
     };
+    let tool_given = p.get("tool").is_some_and(|t| !t.is_null());
+    if curve.is_some() && tool_given {
+        return Err(bad(cmd, "not supported yet: a trim that uses both a curve and a face"));
+    }
     let (plane, tool) = if curve.is_some() {
         (PlaneRef::Origin { name: "XY".into() }, None)
     } else {
@@ -187,19 +204,44 @@ fn as_surface(p: &Value) -> Value {
     q
 }
 
+fn refuse_open_boolean(cmd: &str, p: &Value) -> Result<()> {
+    match str_(p, "operation").map(str::to_ascii_lowercase).as_deref() {
+        Some("join" | "cut" | "intersect") => Err(bad(cmd, "not supported yet: an open surface that joins, cuts or intersects")),
+        _ => Ok(()),
+    }
+}
+
 fn extrude_surface(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "surface.extrude";
+    refuse_open_boolean(cmd, p)?;
+    let through = bool_(p, "through_all") == Some(true) || str_(p, "extent").is_some_and(|e| e.eq_ignore_ascii_case("through_all"));
+    if p.get("taper").is_some() || through || p.get("to").is_some() || p.get("from").is_some() {
+        return Err(bad(cmd, "not supported yet: an open surface with taper, through all, or to/from an object"));
+    }
     super::features::extrude(s, &as_surface(p))
 }
 
 fn revolve_surface(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "surface.revolve";
+    refuse_open_boolean(cmd, p)?;
+    if p.get("to").is_some() || p.get("angle2").is_some() {
+        return Err(bad(cmd, "not supported yet: an open revolve to an object or with two angles"));
+    }
     super::features::revolve(s, &as_surface(p))
 }
 
 fn sweep_surface(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "surface.sweep";
+    refuse_open_boolean(cmd, p)?;
     super::features::sweep(s, &as_surface(p))
 }
 
 fn loft_surface(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "surface.loft";
+    refuse_open_boolean(cmd, p)?;
+    if p.get("rails").is_some() {
+        return Err(bad(cmd, "not supported yet: a guide rail on an open loft"));
+    }
     super::features::loft(s, &as_surface(p))
 }
 
@@ -462,5 +504,177 @@ mod tests {
         run(&mut s, "surface.thicken", json!({"bodies": ["Sheet"], "thickness": "2 mm", "operation": "new", "body_name": "Flipped"}));
         let flipped = s.world_state().body("Flipped").unwrap().body.clone();
         assert!(flipped.tessellate(0.2).unwrap().bounds().min.z < z0 - 0.5, "reversing the normal thickens the other way");
+    }
+
+    /// Feature: fusion360-feature-parity, Property 3: Surface-create yields a zero-thickness surface and one timeline feature
+    #[test]
+    fn a_closed_profile_extrudes_as_an_open_sheet() {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S"}));
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [10, 10]}));
+        run(&mut s, "sketch.finish", json!({}));
+        let n = s.doc.features.len();
+        run(&mut s, "surface.extrude", json!({"sketch": "S", "distance": 10, "body_name": "Tube"}));
+        assert_eq!(s.doc.features.len(), n + 1);
+        assert!(matches!(s.doc.features.last().map(|f| &f.kind), Some(FeatureKind::Extrude { open: true, .. })));
+        let tube = s.world_state().body("Tube").unwrap().body.clone();
+        assert!(tube.is_surface());
+        assert_eq!(tube.face_count(), 4, "four walls and no caps");
+        let m = solidcraft_kernel::measure(&tube).unwrap();
+        assert!((m.area - 400.0).abs() < 1.0, "{}", m.area);
+        let before = s.doc.to_json();
+        let err = s.execute("surface.extrude", &json!({"sketch": "S", "distance": 10, "taper": "5 deg"})).unwrap_err();
+        assert!(err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.to_json(), before);
+        let err = s
+            .execute("surface.loft", &json!({"sections": [{"sketch": "S"}, {"sketch": "S"}], "rails": [{"sketch": "S", "curves": ["nope"]}]}))
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.to_json(), before);
+    }
+
+    /// Feature: fusion360-feature-parity, Property 4: Planar patch area equals the enclosed area
+    #[test]
+    fn a_guide_on_the_boundary_keeps_the_polygon_area() {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Pad"}));
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [10, 10]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(
+            &mut s,
+            "surface.patch",
+            json!({"sketch": "Pad", "guide": [[0, 5, 0], [10, 5, 0]], "edges": [[0, 5, 0], [10, 5, 0], [5, 0, 0]], "body_name": "Sheet"}),
+        );
+        let sheet = s.world_state().body("Sheet").unwrap().body.clone();
+        assert!(sheet.is_surface());
+        assert!((solidcraft_kernel::measure(&sheet).unwrap().area - 100.0).abs() < 1e-3);
+        assert_eq!(s.world_state().bodies.iter().filter(|b| b.body.is_surface()).count(), 1);
+        let n = s.doc.features.len();
+        let err = s.execute("surface.patch", &json!({"sketch": "Pad", "guide": [[0, 5, 0], [10, 5, 0]], "edges": [[0, 5, 5]]})).unwrap_err();
+        assert!(err.to_string().contains("boundary") || err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.features.len(), n);
+        run(&mut s, "surface.patch", json!({"sketch": "Pad", "guide": [[0, 5, 0], [5, 5, 2], [10, 5, 0]], "body_name": "Tent"}));
+        let tent = s.world_state().body("Tent").unwrap().body.clone();
+        assert!(tent.is_surface());
+        assert!(tent.tessellate(0.2).unwrap().bounds().max.z > 1.0);
+    }
+
+    /// Feature: fusion360-feature-parity, Property 5: Trim then untrim restores the surface
+    #[test]
+    fn a_face_tool_trims_and_untrim_restores() {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S"}));
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [10, 10]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "surface.patch", json!({"sketch": "S", "body_name": "Sheet"}));
+        run(&mut s, "solid.box", json!({"length": 2, "width": 12, "height": 10, "corner": [4, -1, -5], "body_name": "Tool"}));
+        run(&mut s, "surface.trim", json!({"body": "Sheet", "tool": {"body": "Tool", "point": [4, 5, 0]}, "keep": [1, 5, 0]}));
+        let kept = solidcraft_kernel::measure(&s.world_state().body("Sheet").unwrap().body).unwrap().area;
+        assert!((kept - 40.0).abs() < 1.0 || (kept - 60.0).abs() < 1.0, "{kept}");
+        run(&mut s, "surface.untrim", json!({"body": "Sheet"}));
+        let back = solidcraft_kernel::measure(&s.world_state().body("Sheet").unwrap().body).unwrap().area;
+        assert!((back - 100.0).abs() < 1e-3, "{back}");
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Round"}));
+        let circle = run(&mut s, "sketch.circle.center", json!({"center": [5, 5], "radius": 2}))["curves"][0].as_str().unwrap().to_string();
+        run(&mut s, "sketch.finish", json!({}));
+        let before = s.doc.to_json();
+        let err = s.execute("surface.trim", &json!({"body": "Sheet", "sketch": "Round", "curve": circle, "keep": [1, 1, 0]})).unwrap_err();
+        assert!(err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.to_json(), before);
+        let err = s
+            .execute(
+                "surface.trim",
+                &json!({"body": "Sheet", "sketch": "Round", "curve": circle, "tool": {"body": "Tool", "point": [4, 5, 0]}, "keep": [1, 5, 0]}),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.to_json(), before);
+    }
+
+    /// Feature: fusion360-feature-parity, Property 6: Stitch closes to a solid exactly when faces bound a volume
+    /// Feature: fusion360-feature-parity, Property 7: Thicken volume equals area times thickness
+    #[test]
+    fn stitch_reports_gap_edges_and_thicken_scales_area() {
+        let mut s = Session::default();
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "A"}));
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [10, 10]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "B"}));
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [30, 0], "p1": [40, 5]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "surface.patch", json!({"sketch": "A", "body_name": "Sheet"}));
+        run(&mut s, "surface.patch", json!({"sketch": "B", "body_name": "Sheet2"}));
+        let made = run(&mut s, "surface.thicken", json!({"bodies": ["Sheet", "Sheet2"], "thickness": "2 mm", "body_name": "Slab"}));
+        let id = made["feature"].as_u64().unwrap();
+        let st = s.world_state();
+        let solids: Vec<_> = st.bodies.iter().filter(|b| b.feature == id).collect();
+        assert_eq!(solids.len(), 2);
+        let volume: f64 = solids.iter().map(|b| solidcraft_kernel::measure(&b.body).unwrap().volume.abs()).sum();
+        assert!((volume - 300.0).abs() < 1e-2, "{volume}");
+        let stitched = run(&mut s, "surface.stitch", json!({"bodies": ["Sheet", "Sheet2"], "tolerance": "0.01 mm"}));
+        assert_eq!(stitched["closed"], json!(false));
+        let edges = stitched["gap_edges"].as_array().unwrap();
+        assert!(!edges.is_empty());
+        assert!(edges.iter().all(|e| e.get("start").is_some() && e.get("end").is_some() && e.get("mid").is_some()));
+        assert_eq!(stitched["gaps"].as_array().map(|g| g.len()), Some(edges.len()));
+        let before = s.doc.to_json();
+        let err = s.execute("surface.thicken", &json!({"bodies": ["Tool"], "thickness": 1})).unwrap_err();
+        assert!(err.to_string().contains("no body") || err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.to_json(), before);
+        run(&mut s, "solid.box", json!({"length": 4, "width": 4, "height": 4, "corner": [80, 0, 0], "body_name": "Sharp"}));
+        let before = s.doc.to_json();
+        let err = s.execute("surface.thicken", &json!({"bodies": ["Sharp"], "thickness": "1 mm"})).unwrap_err();
+        assert!(err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.to_json(), before);
+    }
+
+    /// Feature: fusion360-feature-parity, Property 1: Hostile input never crashes and leaves the design unchanged
+    #[test]
+    fn hostile_surface_params_do_not_panic_or_change_the_design() {
+        let mut base = Session::default();
+        run(&mut base, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Block"}));
+        run(&mut base, "sketch.create", json!({"plane": "XY", "name": "S"}));
+        run(&mut base, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [5, 5]}));
+        run(&mut base, "sketch.finish", json!({}));
+        run(&mut base, "surface.patch", json!({"sketch": "S", "body_name": "Sheet"}));
+        let saved = base.doc.to_json();
+        let ids = [
+            "surface.patch",
+            "surface.stitch",
+            "surface.thicken",
+            "surface.extend",
+            "surface.trim",
+            "surface.untrim",
+            "surface.extrude",
+            "surface.revolve",
+            "surface.sweep",
+            "surface.loft",
+            "surface.offset",
+            "surface.rule",
+            "surface.flatten",
+            "surface.reverse",
+        ];
+        let payloads = [
+            json!(null),
+            json!({}),
+            json!({"thickness": "nan", "distance": "inf", "bodies": [], "keep": [1.0e20, 0.0, 0.0]}),
+            json!({"body": "", "bodies": ["Nope"], "sketch": "Nope", "edges": []}),
+            json!({"guide": [[1.0e20, 0.0, 0.0]], "curve": "", "operation": "cut", "taper": "10 deg"}),
+            json!({"tolerance": "-1", "symmetric": true, "thickness": 0, "angle2": "10 deg"}),
+            json!({"rails": [], "through_all": true, "to": [0, 0, 0], "from": [0, 0, 0]}),
+            json!({"tool": {"body": "Nope", "point": [0.0, 0.0, 1.0e308]}, "plane": {"normal": [0.0, 0.0, 0.0]}}),
+        ];
+        assert!(ids.len() * payloads.len() >= 100);
+        for id in ids {
+            for payload in &payloads {
+                let mut s = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
+                let before = s.doc.to_json();
+                match s.execute(id, payload) {
+                    Err(crate::EngineError::Internal(cmd, msg)) => panic!("{cmd} {payload}: {msg}"),
+                    Err(_) => assert_eq!(s.doc.to_json(), before, "{id} {payload} changed the design"),
+                    Ok(_) => {}
+                }
+            }
+        }
     }
 }

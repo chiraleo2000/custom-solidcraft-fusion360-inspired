@@ -12,7 +12,7 @@ use mt::builder;
 use solidcraft_geom::Vec3;
 use truck_modeling as mt;
 
-use crate::body::{Body, Solid, p3, v3};
+use crate::body::{Body, Solid, from_p3, p3, v3};
 use crate::{KernelError, Result, guard};
 
 /// Most control points of one Bézier chain edge.
@@ -592,6 +592,78 @@ fn plane_about_the_mean(wires: &[mt::Wire]) -> Option<mt::Plane> {
         mt::Surface::Plane(plane) => Some(mt::Transformed::transformed(&plane, mt::Matrix4::from_translation(v3(mean)))),
         _ => None,
     }
+}
+
+/// One edge of a stitched surface that still belongs to a single face.
+#[derive(Clone, Debug)]
+pub struct GapEdge {
+    pub start: Vec3,
+    pub end: Vec3,
+    pub mid: Vec3,
+}
+
+/// Bodies sewn within `tol`: a solid when the faces close, otherwise the joined surface and the
+/// edges that stayed open.
+#[derive(Clone, Debug)]
+pub struct Stitched {
+    pub body: Body,
+    pub closed: bool,
+    pub gaps: Vec<GapEdge>,
+}
+
+/// Sew `bodies` along edges that lie within `tol`. A negative or non-finite tolerance uses the
+/// same tight default as [`crate::surfaces::stitch`]. The gap list is empty when the result is a
+/// closed solid.
+pub fn stitch_tolerant(bodies: &[Body], tol: f64) -> Result<Stitched> {
+    if bodies.is_empty() || bodies.len() > 10_000 {
+        return Err(KernelError::Invalid("nothing to stitch".into()));
+    }
+    let refs: Vec<&Body> = bodies.iter().collect();
+    let body = crate::surfaces::stitch(&refs, tol)?;
+    let gaps = gap_edges(&body)?;
+    let closed = !body.is_surface();
+    Ok(Stitched { body, closed, gaps })
+}
+
+/// Midpoints, starts and ends of edges that belong to only one face. Empty when the body is closed.
+pub fn gap_edges(body: &Body) -> Result<Vec<GapEdge>> {
+    if !body.is_surface() {
+        return Ok(Vec::new());
+    }
+    body.require_brep("stitch gaps")?;
+    guard("stitch gaps", || {
+        use mt::{BoundedCurve, ParametricCurve};
+        let mut counts: HashMap<mt::EdgeID, (mt::Edge, usize)> = HashMap::new();
+        let mut seen = 0usize;
+        for face in body.solid.face_iter() {
+            for edge in face.edge_iter() {
+                seen += 1;
+                if seen > 80_000 {
+                    return Err(KernelError::Invalid("too many edges to report gaps".into()));
+                }
+                counts.entry(edge.id()).and_modify(|(_, n)| *n += 1).or_insert((edge, 1));
+            }
+        }
+        let mut out = Vec::new();
+        for (edge, n) in counts.values() {
+            if *n != 1 {
+                continue;
+            }
+            let curve = edge.curve();
+            let (t0, t1) = curve.range_tuple();
+            let mid = from_p3(curve.subs(t0 + (t1 - t0) * 0.5));
+            let start = from_p3(edge.front().point());
+            let end = from_p3(edge.back().point());
+            if mid.is_finite() && start.is_finite() && end.is_finite() {
+                out.push(GapEdge { start, end, mid });
+            }
+            if out.len() > 10_000 {
+                return Err(KernelError::Invalid("too many gap edges".into()));
+            }
+        }
+        out.sort_by(|a, b| a.mid.x.total_cmp(&b.mid.x).then(a.mid.y.total_cmp(&b.mid.y)).then(a.mid.z.total_cmp(&b.mid.z)));
+        Ok(out)
+    })
 }
 
 #[cfg(test)]
