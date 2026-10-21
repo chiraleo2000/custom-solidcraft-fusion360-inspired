@@ -1,0 +1,25 @@
+{
+  "format": "solidcraft/11",
+  "name": "OldForm",
+  "units": "mm",
+  "params": [],
+  "next_id": 2,
+  "features": [
+    {
+      "id": 1,
+      "name": "Form1",
+      "suppressed": false,
+      "type": "form",
+      "shape": "cylinder",
+      "length": "20 mm",
+      "width": "16 mm",
+      "thickness": "0 mm",
+      "pulls": [
+        {
+          "index": 6,
+          "delta": [0.0, 1.5, 2.0]
+        }
+      ]
+    }
+  ]
+}
