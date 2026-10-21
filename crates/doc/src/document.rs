@@ -2352,11 +2352,22 @@ pub struct Storyboard {
     pub keys: Vec<StoryKey>,
 }
 
+fn identity_rotate() -> [f64; 4] {
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+fn rotate_is_identity(q: &[f64; 4]) -> bool {
+    *q == [0.0, 0.0, 0.0, 1.0]
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoryKey {
     pub time: f64,
     pub occurrence: u64,
     pub translate: [f64; 3],
+    /// Preview rotation as xyzw, on top of the real placement. Identity leaves the orientation.
+    #[serde(default = "identity_rotate", skip_serializing_if = "rotate_is_identity")]
+    pub rotate: [f64; 4],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

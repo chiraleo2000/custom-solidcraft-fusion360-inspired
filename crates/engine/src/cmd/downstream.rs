@@ -1,10 +1,17 @@
 //! Later-workspace commands: machining setups, static stress, render, animation,
 //! a small schematic check, and a generative candidate. Each one is a SolidCraft command.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
+
 use serde_json::{Value, json};
+use solidcraft_doc::motion::ExplodedView;
 use solidcraft_doc::{CamSetup, CamTool, GenerativeStudy, RenderScene, Schematic, StoryKey, Storyboard, Study, StudyConstraint, StudyLoad};
 use solidcraft_geom::fea::{self, BeamEnd, BeamLoad, BeamSection, BeamSupport};
 use solidcraft_geom::generative::{self, Objective};
+use solidcraft_geom::{Mesh, Vec3};
+use solidcraft_render::Quat;
 
 use super::CommandSpec;
 use crate::params::{bad, str_};
@@ -102,13 +109,22 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("sim.cooling", "Cooling Study", sim_cooling).params("body: name. Solving a cooling study is not supported yet"),
     CommandSpec::new("render.environment", "Render Environment", render_environment)
         .noundo()
-        .params("color?: [r,g,b] 0…1; intensity?: number. A missing colour uses white"),
-    CommandSpec::new("render.camera", "Render Camera", render_camera).noundo().params("focal?: millimetres"),
-    CommandSpec::new("render.image", "Render Image", render_image).noundo().params("path: png of the shaded solids. The design is not changed"),
-    CommandSpec::new("anim.storyboard", "Storyboard", anim_storyboard).params("name?"),
-    CommandSpec::new("anim.key", "Animation Key", anim_key).params("story?: name; time: seconds; occurrence: id; translate?: [x,y,z]"),
-    CommandSpec::new("anim.play", "Play Storyboard", anim_play).noundo().params("story?: name. Reads keys and does not move occurrences"),
-    CommandSpec::new("anim.publish", "Publish Storyboard", anim_publish).noundo().params("path: png file. Occurrences stay where they are"),
+        .params("name?|environment?: studio|neutral|white|warm|cool; asset?: name; color?: [r,g,b] 0…1; intensity?: number. An unknown name falls back to white and is reported. No cloud renderer"),
+    CommandSpec::new("render.camera", "Render Camera", render_camera).noundo().params("focal?: millimetres, positive"),
+    CommandSpec::new("render.image", "Render Image", render_image).noundo().params(
+        "path: png; environment?|asset?: studio name; appearance?: library name. Metalness and roughness shade the pixels. A missing name falls back and is reported. The design is not changed. A cloud renderer is not supported yet",
+    ),
+    CommandSpec::new("anim.storyboard", "Storyboard", anim_storyboard).params(
+        "name?; view?: exploded view; study?: motion study; auto?: bool; scale?: number. Copies explode or motion keys when they exist. An empty assembly is an error. Placements stay unchanged",
+    ),
+    CommandSpec::new("anim.key", "Animation Key", anim_key)
+        .params("story?: name; time: seconds; occurrence: id or name; translate?: [x,y,z]; rotate?: [x,y,z,w]. The assembly is not moved"),
+    CommandSpec::new("anim.play", "Play Storyboard", anim_play)
+        .noundo()
+        .params("story?: name; time?: seconds. Interpolates preview offsets. Placements stay unchanged"),
+    CommandSpec::new("anim.publish", "Publish Storyboard", anim_publish).noundo().params(
+        "path: png; frames?: 1…24; story?: name. One image, or stem_000.png … when there are several frames. Video files are not supported yet. Placements stay unchanged",
+    ),
     CommandSpec::new("ecad.schematic", "Schematic", ecad_schematic).params("parts?: [names]"),
     CommandSpec::new("ecad.wire", "Wire", ecad_wire).params("a, b: pin names"),
     CommandSpec::new("ecad.erc", "Electrical Rules", ecad_erc)
@@ -1281,144 +1297,866 @@ fn sim_cooling(s: &mut Session, p: &Value) -> Result<Value> {
     push_study(s, p, "cooling")
 }
 
+const IDENTITY_ROTATE: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
+const RENDER_W: usize = 160;
+const RENDER_H: usize = 120;
+
 fn scene(s: &mut Session) -> &mut RenderScene {
     s.doc_mut().render_scene.get_or_insert(RenderScene { color: [1.0, 1.0, 1.0], intensity: 1.0, focal: 50.0 })
 }
 
+fn rotate_is_identity(q: &[f64; 4]) -> bool {
+    q.iter().zip(IDENTITY_ROTATE).all(|(a, b)| (a - b).abs() <= 1e-9)
+}
+
+fn require_assembly(s: &Session, cmd: &str) -> Result<()> {
+    if s.doc.components.is_empty() || s.doc.occurrences.is_empty() {
+        return Err(bad(cmd, "the assembly has no components"));
+    }
+    Ok(())
+}
+
+fn vec3_finite(cmd: &str, v: &Value, what: &str) -> Result<[f64; 3]> {
+    let arr = v.as_array().filter(|a| a.len() == 3).ok_or_else(|| bad(cmd, format!("`{what}` must be [x, y, z]")))?;
+    let mut out = [0.0; 3];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let n = arr.get(i).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("`{what}` must be [x, y, z]")))?;
+        *slot = finite(cmd, n, what)?;
+        if slot.abs() > 1e7 {
+            return Err(bad(cmd, format!("`{what}` is too large")));
+        }
+    }
+    Ok(out)
+}
+
+fn quat_param(cmd: &str, v: &Value) -> Result<[f64; 4]> {
+    let arr = v.as_array().filter(|a| a.len() == 4).ok_or_else(|| bad(cmd, "`rotate` must be [x, y, z, w]"))?;
+    let mut q = [0.0; 4];
+    for (i, slot) in q.iter_mut().enumerate() {
+        let n = arr.get(i).and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`rotate` must be [x, y, z, w]"))?;
+        *slot = finite(cmd, n, "rotate")?;
+    }
+    let len = q.iter().map(|n| n * n).sum::<f64>().sqrt();
+    if !(len.is_finite() && len >= 1e-8) {
+        return Err(bad(cmd, "`rotate` must be a rotation"));
+    }
+    Ok([q[0] / len, q[1] / len, q[2] / len, q[3] / len])
+}
+
+fn occurrence_ref(s: &Session, v: Option<&Value>, cmd: &str) -> Result<u64> {
+    let Some(v) = v else { return Err(bad(cmd, "`occurrence` is required")) };
+    let key = match v {
+        Value::Number(n) => n.to_string(),
+        Value::String(name) if !name.is_empty() && name.len() <= 200 => name.clone(),
+        _ => return Err(bad(cmd, "`occurrence` must be an id or a name")),
+    };
+    s.doc
+        .occurrences
+        .iter()
+        .find(|o| o.id.to_string() == key || o.name == key)
+        .map(|o| o.id)
+        .ok_or_else(|| bad(cmd, format!("no occurrence `{key}`")))
+}
+
+fn key_sane(key: &StoryKey) -> bool {
+    key.time.is_finite()
+        && (0.0..=1e6).contains(&key.time)
+        && key.translate.iter().all(|n| n.is_finite() && n.abs() <= 1e7)
+        && key.rotate.iter().all(|n| n.is_finite())
+        && key.rotate.iter().map(|n| n * n).sum::<f64>() > 1e-8
+}
+
+fn keys_resolve(s: &Session, keys: &[StoryKey], cmd: &str) -> Result<()> {
+    if keys.len() > 4096 {
+        return Err(bad(cmd, "too many keys"));
+    }
+    for key in keys {
+        if !key_sane(key) {
+            return Err(bad(cmd, "a step is not usable"));
+        }
+        if !s.doc.occurrences.iter().any(|o| o.id == key.occurrence) {
+            return Err(bad(cmd, format!("no occurrence {}", key.occurrence)));
+        }
+    }
+    Ok(())
+}
+
+fn pose_of(keys: &[StoryKey], occurrence: u64, time: f64, cmd: &str) -> Result<([f64; 3], [f64; 4])> {
+    let mut list: Vec<(usize, &StoryKey)> = keys.iter().enumerate().filter(|(_, key)| key.occurrence == occurrence).collect();
+    if list.len() > 4096 {
+        return Err(bad(cmd, "too many keys"));
+    }
+    list.sort_by(|a, b| a.1.time.total_cmp(&b.1.time).then(a.0.cmp(&b.0)));
+    let mut span: Vec<&StoryKey> = Vec::new();
+    for (_, key) in list {
+        if !key_sane(key) {
+            return Err(bad(cmd, "a step is not usable"));
+        }
+        if span.last().is_some_and(|prev| (prev.time - key.time).abs() <= 1e-9) {
+            span.pop();
+        }
+        span.push(key);
+    }
+    let (Some(first), Some(last)) = (span.first(), span.last()) else {
+        return Ok(([0.0, 0.0, 0.0], IDENTITY_ROTATE));
+    };
+    if time <= first.time {
+        return Ok((first.translate, first.rotate));
+    }
+    if time >= last.time {
+        return Ok((last.translate, last.rotate));
+    }
+    for pair in span.windows(2) {
+        let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else { continue };
+        if time < a.time || time > b.time {
+            continue;
+        }
+        let dt = b.time - a.time;
+        let t = if dt.abs() <= 1e-12 { 0.0 } else { ((time - a.time) / dt).clamp(0.0, 1.0) };
+        let translate = [
+            a.translate[0] + (b.translate[0] - a.translate[0]) * t,
+            a.translate[1] + (b.translate[1] - a.translate[1]) * t,
+            a.translate[2] + (b.translate[2] - a.translate[2]) * t,
+        ];
+        let qa = Quat { x: a.rotate[0], y: a.rotate[1], z: a.rotate[2], w: a.rotate[3] }.normalized();
+        let qb = Quat { x: b.rotate[0], y: b.rotate[1], z: b.rotate[2], w: b.rotate[3] }.normalized();
+        let q = qa.slerp(qb, t);
+        return Ok((translate, [q.x, q.y, q.z, q.w]));
+    }
+    Ok((last.translate, last.rotate))
+}
+
+fn pose_map(keys: &[StoryKey], time: f64, cmd: &str) -> Result<BTreeMap<u64, ([f64; 3], [f64; 4])>> {
+    let mut ids = Vec::new();
+    for key in keys.iter().take(4096) {
+        if !ids.contains(&key.occurrence) {
+            ids.push(key.occurrence);
+        }
+    }
+    let mut map = BTreeMap::new();
+    for id in ids {
+        map.insert(id, pose_of(keys, id, time, cmd)?);
+    }
+    Ok(map)
+}
+
+fn read3(v: Option<&Value>) -> Option<[f64; 3]> {
+    let arr = v?.as_array()?;
+    if arr.len() != 3 {
+        return None;
+    }
+    let mut out = [0.0; 3];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = arr.get(i)?.as_f64()?;
+        if !slot.is_finite() {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+fn read_axis(v: Option<&Value>, fallback: Vec3) -> Vec3 {
+    match read3(v).map(|a| Vec3::new(a[0], a[1], a[2])) {
+        Some(axis) if axis.is_finite() => axis,
+        _ => fallback,
+    }
+}
+
+fn axes_close(a: [Vec3; 3], b: [Vec3; 3]) -> bool {
+    a.iter().zip(b).all(|(p, q)| p.dist(q) < 1e-5)
+}
+
+fn delta_quat(rest: [Vec3; 3], posed: [Vec3; 3]) -> [f64; 4] {
+    let [r0, r1, r2] = rest;
+    let [p0, p1, p2] = posed;
+    let col = |x: f64, y: f64, z: f64| p0 * x + p1 * y + p2 * z;
+    let q = Quat::from_basis(col(r0.x, r1.x, r2.x), col(r0.y, r1.y, r2.y), col(r0.z, r1.z, r2.z));
+    [q.x, q.y, q.z, q.w]
+}
+
+fn keys_from_offsets(moves: &[(u64, [f64; 3])]) -> Vec<StoryKey> {
+    let mut keys = Vec::new();
+    for (occurrence, translate) in moves.iter().take(4096) {
+        keys.push(StoryKey { time: 0.0, occurrence: *occurrence, translate: [0.0, 0.0, 0.0], rotate: IDENTITY_ROTATE });
+        keys.push(StoryKey { time: 1.0, occurrence: *occurrence, translate: *translate, rotate: IDENTITY_ROTATE });
+    }
+    keys
+}
+
+fn keys_from_explode(s: &Session, view: &ExplodedView) -> Result<Vec<StoryKey>> {
+    let cmd = "anim.storyboard";
+    if view.moves.is_empty() || view.moves.len() > 4096 {
+        return Err(bad(cmd, "the exploded view has no usable steps"));
+    }
+    let mut moves = Vec::new();
+    for (occurrence, translate) in &view.moves {
+        if !translate.is_finite() {
+            return Err(bad(cmd, "an explode step is not finite"));
+        }
+        if !s.doc.occurrences.iter().any(|o| o.id == *occurrence) {
+            return Err(bad(cmd, format!("no occurrence {occurrence}")));
+        }
+        moves.push((*occurrence, [translate.x, translate.y, translate.z]));
+    }
+    Ok(keys_from_offsets(&moves))
+}
+
+fn keys_from_motion(s: &Session, study: &str) -> Result<Vec<StoryKey>> {
+    let cmd = "anim.storyboard";
+    let mut trial = s.scratch();
+    let exported = trial.execute("motion.export", &json!({"study": study, "samples": 5})).map_err(|e| bad(cmd, e.to_string()))?;
+    let samples = exported.get("samples").and_then(Value::as_array).ok_or_else(|| bad(cmd, "the motion study returned no samples"))?;
+    if samples.is_empty() || samples.len() > 32 {
+        return Err(bad(cmd, "the motion study returned no samples"));
+    }
+    struct Row {
+        time: f64,
+        occurrence: u64,
+        origin: [f64; 3],
+        axes: [Vec3; 3],
+    }
+    let mut rows = Vec::new();
+    for (i, sample) in samples.iter().enumerate() {
+        let time = sample.get("step").and_then(Value::as_f64).filter(|t| t.is_finite()).unwrap_or(i as f64);
+        let positions = sample.get("positions").and_then(Value::as_array).ok_or_else(|| bad(cmd, "a motion sample has no positions"))?;
+        if positions.len() > 10_000 {
+            return Err(bad(cmd, "too many occurrences in a motion sample"));
+        }
+        for pos in positions {
+            let Some(name) = pos.get("occurrence").and_then(Value::as_str) else { continue };
+            let Some(occurrence) = s.doc.occurrences.iter().find(|o| o.name == name || o.id.to_string() == name).map(|o| o.id) else {
+                continue;
+            };
+            let Some(pose) = pos.get("pose") else { continue };
+            let Some(origin) = read3(pose.get("origin")) else {
+                return Err(bad(cmd, "a motion pose has no origin"));
+            };
+            let axes = [read_axis(pose.get("x"), Vec3::X), read_axis(pose.get("y"), Vec3::Y), read_axis(pose.get("z"), Vec3::Z)];
+            rows.push(Row { time, occurrence, origin, axes });
+        }
+    }
+    if rows.is_empty() || rows.len() > 4096 {
+        return Err(bad(cmd, "the motion study did not name an occurrence"));
+    }
+    rows.sort_by(|a, b| a.time.total_cmp(&b.time).then(a.occurrence.cmp(&b.occurrence)));
+    let mut ids = Vec::new();
+    for row in &rows {
+        if !ids.contains(&row.occurrence) {
+            ids.push(row.occurrence);
+        }
+    }
+    let mut keys = Vec::new();
+    for id in ids {
+        let mine: Vec<&Row> = rows.iter().filter(|row| row.occurrence == id).collect();
+        let Some(rest) = mine.first() else { continue };
+        let rest_origin = rest.origin;
+        let rest_axes = rest.axes;
+        for row in &mine {
+            let translate = [row.origin[0] - rest_origin[0], row.origin[1] - rest_origin[1], row.origin[2] - rest_origin[2]];
+            if translate.iter().any(|n| !n.is_finite() || n.abs() > 1e7) {
+                return Err(bad(cmd, "a motion step is not usable"));
+            }
+            let rotate = if axes_close(rest_axes, row.axes) { IDENTITY_ROTATE } else { delta_quat(rest_axes, row.axes) };
+            keys.push(StoryKey { time: row.time, occurrence: id, translate, rotate });
+        }
+    }
+    if keys.len() > 4096 {
+        return Err(bad(cmd, "too many keys"));
+    }
+    Ok(keys)
+}
+
+fn scale_of(p: &Value) -> Result<f64> {
+    let cmd = "anim.storyboard";
+    match p.get("scale") {
+        None => Ok(1.0),
+        Some(v) => {
+            let n = v.as_f64().ok_or_else(|| bad(cmd, "`scale` must be a number"))?;
+            let n = finite(cmd, n, "scale")?;
+            if n.abs() > 100.0 {
+                return Err(bad(cmd, "`scale` must be a number up to 100"));
+            }
+            Ok(n)
+        }
+    }
+}
+
+fn auto_moves(s: &Session, scale: f64) -> Result<Vec<(u64, [f64; 3])>> {
+    let cmd = "anim.storyboard";
+    let mut trial = s.scratch();
+    let created = trial.execute("explode.create", &json!({"scale": scale, "name": "Story Explode"})).map_err(|e| bad(cmd, e.to_string()))?;
+    let moves = created.get("moves").and_then(Value::as_array).ok_or_else(|| bad(cmd, "the explode step returned no moves"))?;
+    if moves.is_empty() || moves.len() > 4096 {
+        return Err(bad(cmd, "the explode step returned no moves"));
+    }
+    let mut out = Vec::new();
+    for step in moves {
+        let id = step.get("occurrence").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "an explode step has no occurrence"))?;
+        if !s.doc.occurrences.iter().any(|o| o.id == id) {
+            return Err(bad(cmd, format!("no occurrence {id}")));
+        }
+        let translate = vec3_finite(cmd, step.get("translate").unwrap_or(&Value::Null), "translate")?;
+        out.push((id, translate));
+    }
+    Ok(out)
+}
+
+fn chosen_view(s: &Session, p: &Value) -> Result<Option<ExplodedView>> {
+    let cmd = "anim.storyboard";
+    let Some(v) = p.get("view") else { return Ok(None) };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let key = match v {
+        Value::Number(n) => n.to_string(),
+        Value::String(name) if !name.is_empty() && name.len() <= 200 => name.clone(),
+        _ => return Err(bad(cmd, "`view` must be an id or a name")),
+    };
+    s.doc
+        .assembly
+        .exploded
+        .iter()
+        .find(|view| view.id.to_string() == key || view.name == key)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| bad(cmd, format!("no exploded view `{key}`")))
+}
+
+fn chosen_study(s: &Session, p: &Value) -> Result<Option<String>> {
+    let cmd = "anim.storyboard";
+    let Some(v) = p.get("study") else { return Ok(None) };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let key = match v {
+        Value::Number(n) => n.to_string(),
+        Value::String(name) if !name.is_empty() && name.len() <= 200 => name.clone(),
+        _ => return Err(bad(cmd, "`study` must be an id or a name")),
+    };
+    s.doc
+        .assembly
+        .studies
+        .iter()
+        .find(|study| study.id.to_string() == key || study.name == key)
+        .map(|study| Some(study.name.clone()))
+        .ok_or_else(|| bad(cmd, format!("no motion study `{key}`")))
+}
+
+fn story_name(p: &Value, cmd: &str) -> Result<String> {
+    match str_(p, "name") {
+        None => Ok("Story".to_string()),
+        Some(name) if !name.is_empty() && name.len() <= 200 && !name.chars().any(char::is_control) => Ok(name.to_string()),
+        Some(_) => Err(bad(cmd, "the storyboard name is not usable")),
+    }
+}
+
+fn assembly_same(
+    s: &Session,
+    features: usize,
+    occurrences: &[solidcraft_doc::Occurrence],
+    pending: &BTreeMap<u64, solidcraft_doc::Mat>,
+    assembly: &solidcraft_doc::joints::Assembly,
+) -> bool {
+    s.doc.features.len() == features && s.doc.occurrences == occurrences && &s.pending_moves == pending && &s.doc.assembly == assembly
+}
+
+struct BodyPaint {
+    mesh: Arc<Mesh>,
+    color: solidcraft_render::Rgb,
+    metalness: f64,
+    roughness: f64,
+    face_colors: Vec<(u32, solidcraft_render::Rgb)>,
+    face_shade: Vec<(u32, f64, f64)>,
+    path: Vec<u64>,
+}
+
+fn body_paints(s: &Session, cmd: &str) -> Result<Vec<BodyPaint>> {
+    let local = s.model.state();
+    let frames = s.doc.body_frames(&local);
+    let world = s.world_state();
+    let mut out = Vec::new();
+    for body in world.bodies.iter().take(10_000) {
+        let mesh = body.mesh();
+        if mesh.positions.is_empty() || mesh.triangles.is_empty() {
+            continue;
+        }
+        if mesh.positions.len() > 2_000_000 || mesh.triangles.len() > 2_000_000 {
+            return Err(bad(cmd, "the mesh is too large to shade"));
+        }
+        let look = s.doc.model_body_look(body);
+        let color = if let Some(look) = &look {
+            solidcraft_render::Rgb(look.color[0], look.color[1], look.color[2])
+        } else {
+            s.doc.body_color(body).map_or(solidcraft_render::Rgb(168, 176, 186), |rgb| {
+                let to8 = |x: f32| {
+                    let x = if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 };
+                    (x * 255.0).round() as u8
+                };
+                solidcraft_render::Rgb(to8(rgb[0]), to8(rgb[1]), to8(rgb[2]))
+            })
+        };
+        let metalness = look.as_ref().map(|l| l.metalness).unwrap_or(0.0);
+        let roughness = look.as_ref().map(|l| l.roughness).unwrap_or(0.5);
+        let faces = s.doc.face_colors(body);
+        let mut face_colors = Vec::new();
+        let mut face_shade = Vec::new();
+        for (face, look) in faces {
+            let Ok(index) = u32::try_from(face) else { continue };
+            face_colors.push((index, solidcraft_render::Rgb(look.color[0], look.color[1], look.color[2])));
+            face_shade.push((index, look.metalness, look.roughness));
+        }
+        let path = frames.iter().find(|(name, _, _, _)| name == &body.name).map(|(_, _, path, _)| path.clone()).unwrap_or_default();
+        out.push(BodyPaint { mesh, color, metalness, roughness, face_colors, face_shade, path });
+    }
+    Ok(out)
+}
+
+fn apply_offset(mesh: &mut Mesh, origin: Vec3, translate: [f64; 3], rotate: [f64; 4]) {
+    let spin = !rotate_is_identity(&rotate);
+    let q = Quat { x: rotate[0], y: rotate[1], z: rotate[2], w: rotate[3] }.normalized();
+    let shift = Vec3::new(translate[0], translate[1], translate[2]);
+    let turn = |v: Vec3| {
+        let (x, y, z) = q.basis();
+        x * v.x + y * v.y + z * v.z
+    };
+    for p in &mut mesh.positions {
+        if !p.is_finite() {
+            continue;
+        }
+        if spin {
+            *p = origin + turn(*p - origin) + shift;
+        } else {
+            *p += shift;
+        }
+    }
+    if spin {
+        for n in &mut mesh.normals {
+            if n.is_finite() {
+                *n = turn(*n);
+            }
+        }
+    }
+}
+
+fn mesh_at(mesh: &Arc<Mesh>, path: &[u64], poses: &BTreeMap<u64, ([f64; 3], [f64; 4])>, origins: &BTreeMap<u64, Vec3>) -> Arc<Mesh> {
+    let moves = path.iter().any(|id| poses.get(id).is_some_and(|(t, r)| *t != [0.0, 0.0, 0.0] || !rotate_is_identity(r)));
+    if !moves {
+        return Arc::clone(mesh);
+    }
+    let mut out = mesh.as_ref().clone();
+    for id in path.iter().take(64) {
+        let Some((translate, rotate)) = poses.get(id) else { continue };
+        if *translate == [0.0, 0.0, 0.0] && rotate_is_identity(rotate) {
+            continue;
+        }
+        let origin = origins.get(id).copied().unwrap_or(Vec3::ZERO);
+        apply_offset(&mut out, origin, *translate, *rotate);
+    }
+    Arc::new(out)
+}
+
+fn origins_of(s: &Session) -> BTreeMap<u64, Vec3> {
+    let mut out = BTreeMap::new();
+    for occurrence in s.doc.occurrences.iter().take(10_000) {
+        let m = solidcraft_doc::joints::occurrence_world(&s.doc, occurrence.id);
+        out.insert(occurrence.id, Vec3::new(m[3][0], m[3][1], m[3][2]));
+    }
+    out
+}
+
+fn render_paints(
+    paints: &[BodyPaint],
+    poses: &BTreeMap<u64, ([f64; 3], [f64; 4])>,
+    origins: &BTreeMap<u64, Vec3>,
+    light: ([f64; 3], f64),
+    focal: f64,
+    cmd: &str,
+) -> Result<solidcraft_render::Canvas> {
+    let mut scene = solidcraft_render::Scene { light: Some(light), ..solidcraft_render::Scene::default() };
+    let mut min = Vec3::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = Vec3::new(f64::MIN, f64::MIN, f64::MIN);
+    let mut any = false;
+    for paint in paints.iter().take(10_000) {
+        let mesh = mesh_at(&paint.mesh, &paint.path, poses, origins);
+        let bounds = mesh.bounds();
+        if bounds.is_empty() {
+            continue;
+        }
+        min = Vec3::new(min.x.min(bounds.min.x), min.y.min(bounds.min.y), min.z.min(bounds.min.z));
+        max = Vec3::new(max.x.max(bounds.max.x), max.y.max(bounds.max.y), max.z.max(bounds.max.z));
+        scene.meshes.push(solidcraft_render::SceneMesh {
+            mesh,
+            color: paint.color,
+            metalness: paint.metalness,
+            roughness: paint.roughness,
+            face_colors: paint.face_colors.clone(),
+            face_shade: paint.face_shade.clone(),
+        });
+        any = true;
+    }
+    if !any || !min.is_finite() || !max.is_finite() {
+        return Err(bad(cmd, "there is no solid to render"));
+    }
+    let center = (min + max) * 0.5;
+    let radius = (max - min).len().max(1.0) * 0.5;
+    let focal = if focal.is_finite() && focal > 0.0 { focal.clamp(5.0, 500.0) } else { 50.0 };
+    let distance = (radius * 3.2).max(20.0) * (50.0 / focal);
+    let cam = solidcraft_render::Camera { target: center, distance, ..Default::default() };
+    scene.radius = radius;
+    Ok(solidcraft_render::render(&scene, &cam, RENDER_W, RENDER_H))
+}
+
+fn image_varied(rgba: &[u8]) -> bool {
+    let mut colors = 0u32;
+    let mut seen = [0u8; 64];
+    for px in rgba.chunks(4).step_by(24) {
+        let key = ((px.first().copied().unwrap_or(0) / 16) << 4) | (px.get(1).copied().unwrap_or(0) / 16);
+        let slot = (key as usize) % seen.len();
+        if seen.get(slot).copied().unwrap_or(1) == 0 {
+            if let Some(flag) = seen.get_mut(slot) {
+                *flag = 1;
+            }
+            colors += 1;
+        }
+    }
+    colors >= 2
+}
+
+fn write_png(cmd: &str, path: &str, canvas: solidcraft_render::Canvas) -> Result<()> {
+    let bytes = solidcraft_render::png(canvas.w, canvas.h, canvas.rgba).ok_or_else(|| bad(cmd, "could not encode the image"))?;
+    solidcraft_io::write_atomic(Path::new(path), &bytes, false).map_err(|e| bad(cmd, format!("{path}: {e}")))
+}
+
+fn usable_path<'a>(p: &'a Value, cmd: &str) -> Result<&'a str> {
+    let path = str_(p, "path").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`path` is required"))?;
+    if path.len() > 4096 || path.contains('\0') {
+        return Err(bad(cmd, "the path is not usable"));
+    }
+    Ok(path)
+}
+
+fn is_video(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "mp4" | "webm" | "mov" | "avi" | "mkv" | "gif")
+}
+
+fn sequence_path(path: &str, index: usize, count: usize) -> String {
+    if count <= 1 {
+        return path.to_string();
+    }
+    let path = Path::new(path);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
+    let ext = path.extension().and_then(|s| s.to_str()).filter(|ext| !ext.is_empty()).unwrap_or("png");
+    let name = format!("{stem}_{index:03}.{ext}");
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name).to_string_lossy().into_owned(),
+        _ => name,
+    }
+}
+
+fn key_span(keys: &[StoryKey]) -> (f64, f64) {
+    let mut lo = f64::MAX;
+    let mut hi = f64::MIN;
+    for key in keys.iter().take(4096) {
+        if key.time.is_finite() {
+            lo = lo.min(key.time);
+            hi = hi.max(key.time);
+        }
+    }
+    if lo <= hi { (lo, hi) } else { (0.0, 0.0) }
+}
+
+fn doc_unchanged(s: &Session, doc: *const solidcraft_doc::Document, pending: &BTreeMap<u64, solidcraft_doc::Mat>) -> bool {
+    std::ptr::eq(doc, Arc::as_ptr(&s.doc)) && &s.pending_moves == pending
+}
+
+fn named_light(p: &Value, cmd: &str) -> Result<(Option<([f64; 3], f64)>, Vec<String>, bool)> {
+    let mut missing = Vec::new();
+    let mut light = None;
+    let mut named = false;
+    for key in ["name", "environment", "asset"] {
+        let Some(name) = str_(p, key) else { continue };
+        named = true;
+        if name.len() > 4096 {
+            return Err(bad(cmd, "the environment name is too long"));
+        }
+        match solidcraft_render::studio(name) {
+            Some(studio) => light = Some((studio.color, studio.intensity)),
+            None => {
+                if !missing.iter().any(|have| have == name) {
+                    missing.push(name.to_string());
+                }
+            }
+        }
+    }
+    Ok((light, missing, named))
+}
+
 fn render_environment(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "render.environment";
-    let mut color = [1.0, 1.0, 1.0];
-    let mut fallback = false;
-    if let Some(values) = p.get("color").and_then(Value::as_array) {
+    let features = s.doc.features.len();
+    let occurrences = s.doc.occurrences.clone();
+    let pending = s.pending_moves.clone();
+    let assembly = s.doc.assembly.clone();
+    let (named, mut missing, asked) = named_light(p, cmd)?;
+    let mut color = named.map(|(color, _)| color).unwrap_or([1.0, 1.0, 1.0]);
+    let mut intensity = named.map(|(_, intensity)| intensity).unwrap_or(1.0);
+    if let Some(v) = p.get("color")
+        && !v.is_null()
+    {
+        let values = v.as_array().filter(|a| a.len() == 3).ok_or_else(|| bad(cmd, "`color` is [r, g, b]"))?;
         for (i, slot) in color.iter_mut().enumerate() {
-            let n = values.get(i).and_then(Value::as_f64).unwrap_or(1.0);
-            *slot = finite(cmd, n, "color")?;
+            let n = values.get(i).and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`color` is [r, g, b]"))?;
+            *slot = finite(cmd, n, "color")?.clamp(0.0, 4.0);
         }
-    } else {
-        fallback = true;
     }
-    let intensity = p.get("intensity").and_then(Value::as_f64).unwrap_or(1.0);
-    let intensity = finite(cmd, intensity, "intensity")?;
+    if let Some(v) = p.get("intensity") {
+        let n = v.as_f64().ok_or_else(|| bad(cmd, "`intensity` must be a number"))?;
+        intensity = finite(cmd, n, "intensity")?.clamp(0.0, 8.0);
+    }
+    let fallback = !missing.is_empty() || (!asked && p.get("color").is_none());
+    if !missing.is_empty() && named.is_none() && p.get("color").is_none() {
+        color = [1.0, 1.0, 1.0];
+        intensity = if p.get("intensity").is_some() { intensity } else { 1.0 };
+    }
     let scene = scene(s);
     scene.color = color;
     scene.intensity = intensity;
-    Ok(json!({"color": color, "intensity": intensity, "fallback": fallback}))
+    if !assembly_same(s, features, &occurrences, &pending, &assembly) {
+        return Err(bad(cmd, "the environment changed the design"));
+    }
+    missing.sort();
+    missing.dedup();
+    Ok(json!({"color": color, "intensity": intensity, "fallback": fallback, "missing": missing}))
 }
 
 fn render_camera(s: &mut Session, p: &Value) -> Result<Value> {
-    let focal = p.get("focal").and_then(Value::as_f64).unwrap_or(50.0);
-    let focal = finite("render.camera", focal, "focal")?;
+    let cmd = "render.camera";
+    let focal = match p.get("focal") {
+        None => 50.0,
+        Some(v) => v.as_f64().ok_or_else(|| bad(cmd, "`focal` must be a number"))?,
+    };
+    let focal = finite(cmd, focal, "focal")?;
+    if focal <= 0.0 || focal > 10_000.0 {
+        return Err(bad(cmd, "`focal` must be positive"));
+    }
+    let features = s.doc.features.len();
+    let occurrences = s.doc.occurrences.clone();
     scene(s).focal = focal;
+    if s.doc.features.len() != features || s.doc.occurrences != occurrences {
+        return Err(bad(cmd, "the camera changed the design"));
+    }
     Ok(json!({"focal": focal}))
 }
 
 fn render_image(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "render.image";
-    let path = str_(p, "path").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`path` is required"))?;
-    if path.len() > 4096 {
-        return Err(bad(cmd, "the path is too long"));
+    if p.get("cloud").and_then(Value::as_bool) == Some(true) || str_(p, "renderer").is_some_and(|name| name.eq_ignore_ascii_case("cloud")) {
+        return Err(bad(cmd, "not supported yet: a cloud renderer"));
     }
-    let features = s.doc.features.len();
-    if s.doc.render_scene.is_none() {
-        let _ = render_environment(s, &json!({}))?;
-    }
-    let mut scene = solidcraft_render::Scene::default();
-    let mut min = solidcraft_geom::Vec3::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut max = solidcraft_geom::Vec3::new(f64::MIN, f64::MIN, f64::MIN);
-    let mut any = false;
-    for body in &s.model.state().bodies {
-        let mesh = body.mesh();
-        if mesh.positions.is_empty() {
-            continue;
+    let path = usable_path(p, cmd)?;
+    let doc = Arc::as_ptr(&s.doc);
+    let pending = s.pending_moves.clone();
+    let (named, mut missing, _) = named_light(p, cmd)?;
+    if let Some(name) = str_(p, "appearance") {
+        if name.len() > 200 {
+            return Err(bad(cmd, "the appearance name is too long"));
         }
-        let bounds = mesh.bounds();
-        min = solidcraft_geom::Vec3::new(min.x.min(bounds.min.x), min.y.min(bounds.min.y), min.z.min(bounds.min.z));
-        max = solidcraft_geom::Vec3::new(max.x.max(bounds.max.x), max.y.max(bounds.max.y), max.z.max(bounds.max.z));
-        scene.meshes.push(solidcraft_render::SceneMesh { mesh, color: solidcraft_render::Rgb(168, 176, 186), face_colors: Vec::new() });
-        any = true;
-    }
-    if !any {
-        return Err(bad(cmd, "there is no solid to render"));
-    }
-    let center = (min + max) * 0.5;
-    let radius = (max - min).len().max(1.0) * 0.5;
-    let cam = solidcraft_render::Camera { target: center, distance: (radius * 3.2).max(20.0), ..Default::default() };
-    scene.radius = radius;
-    let (w, h) = (160usize, 120usize);
-    let canvas = solidcraft_render::render(&scene, &cam, w, h);
-    let mut colors = 0u32;
-    let mut seen = [0u8; 64];
-    for px in canvas.rgba.chunks(4).step_by(24) {
-        let key = ((px.first().copied().unwrap_or(0) / 16) << 4) | (px.get(1).copied().unwrap_or(0) / 16);
-        let slot = (key as usize) % seen.len();
-        if seen[slot] == 0 {
-            seen[slot] = 1;
-            colors += 1;
+        if solidcraft_doc::appearance::library(name).is_none() {
+            missing.push(name.to_string());
         }
     }
-    if colors < 2 {
+    let stored = s.doc.render_scene.clone().unwrap_or(RenderScene { color: [1.0, 1.0, 1.0], intensity: 1.0, focal: 50.0 });
+    let asked_light = str_(p, "environment").is_some() || str_(p, "asset").is_some() || str_(p, "name").is_some();
+    let (color, intensity) = match named {
+        Some(light) => light,
+        None if asked_light => ([1.0, 1.0, 1.0], 1.0),
+        None => (stored.color, stored.intensity),
+    };
+    let paints = body_paints(s, cmd)?;
+    let canvas = render_paints(&paints, &BTreeMap::new(), &origins_of(s), (color, intensity), stored.focal, cmd)?;
+    if !image_varied(&canvas.rgba) {
         return Err(bad(cmd, "the render has no shaded solid"));
     }
-    let bytes = solidcraft_render::png(canvas.w, canvas.h, canvas.rgba).ok_or_else(|| bad(cmd, "could not encode the image"))?;
-    std::fs::write(path, bytes).map_err(|e| bad(cmd, e.to_string()))?;
-    if s.doc.features.len() != features {
+    if !doc_unchanged(s, doc, &pending) {
         return Err(bad(cmd, "rendering changed the design"));
     }
-    Ok(json!({"path": path, "width": w, "height": h, "varied": true}))
+    let (w, h) = (canvas.w, canvas.h);
+    write_png(cmd, path, canvas)?;
+    if !doc_unchanged(s, doc, &pending) {
+        return Err(bad(cmd, "rendering changed the design"));
+    }
+    missing.sort();
+    missing.dedup();
+    Ok(json!({"path": path, "width": w, "height": h, "varied": true, "fallback": !missing.is_empty(), "missing": missing}))
 }
 
 fn anim_storyboard(s: &mut Session, p: &Value) -> Result<Value> {
-    let name = str_(p, "name").unwrap_or("Story").to_string();
-    let before = s.doc.occurrences.clone();
-    s.doc_mut().stories.push(Storyboard { name: name.clone(), keys: Vec::new() });
-    if s.doc.occurrences != before {
-        return Err(bad("anim.storyboard", "the storyboard moved the assembly"));
+    let cmd = "anim.storyboard";
+    require_assembly(s, cmd)?;
+    let name = story_name(p, cmd)?;
+    if s.doc.stories.len() >= 64 {
+        return Err(bad(cmd, "too many storyboards"));
     }
-    Ok(json!({"story": name}))
+    let auto = match p.get("auto") {
+        None => false,
+        Some(Value::Bool(v)) => *v,
+        Some(_) => return Err(bad(cmd, "`auto` must be true or false")),
+    };
+    let (keys, source) = if auto {
+        (keys_from_offsets(&auto_moves(s, scale_of(p)?)?), "auto")
+    } else {
+        let view = chosen_view(s, p)?;
+        let study = chosen_study(s, p)?;
+        if view.is_some() && study.is_some() {
+            return Err(bad(cmd, "pass `view` or `study`, not both"));
+        }
+        if let Some(view) = view {
+            (keys_from_explode(s, &view)?, "explode")
+        } else if let Some(study) = study {
+            (keys_from_motion(s, &study)?, "motion")
+        } else if let Some(view) = s.doc.assembly.exploded.last().cloned() {
+            (keys_from_explode(s, &view)?, "explode")
+        } else if let Some(study) = s.doc.assembly.studies.last().map(|study| study.name.clone()) {
+            (keys_from_motion(s, &study)?, "motion")
+        } else {
+            (Vec::new(), "empty")
+        }
+    };
+    if keys.len() > 4096 {
+        return Err(bad(cmd, "too many keys"));
+    }
+    keys_resolve(s, &keys, cmd)?;
+    let features = s.doc.features.len();
+    let occurrences = s.doc.occurrences.clone();
+    let pending = s.pending_moves.clone();
+    let assembly = s.doc.assembly.clone();
+    s.doc_mut().stories.push(Storyboard { name: name.clone(), keys: keys.clone() });
+    if !assembly_same(s, features, &occurrences, &pending, &assembly) {
+        return Err(bad(cmd, "the storyboard moved the assembly"));
+    }
+    Ok(json!({"story": name, "keys": keys.len(), "source": source}))
 }
 
 fn anim_key(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "anim.key";
-    let time = finite(cmd, p.get("time").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`time` is required"))?, "time")?;
-    let occurrence = p.get("occurrence").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "`occurrence` is required"))?;
-    let translate = p.get("translate").and_then(Value::as_array);
-    let mut at = [0.0; 3];
-    if let Some(translate) = translate {
-        for (i, slot) in at.iter_mut().enumerate() {
-            *slot = finite(cmd, translate.get(i).and_then(Value::as_f64).unwrap_or(0.0), "translate")?;
-        }
+    require_assembly(s, cmd)?;
+    let time = match p.get("time") {
+        Some(v) => v.as_f64().ok_or_else(|| bad(cmd, "`time` must be a number"))?,
+        None => return Err(bad(cmd, "`time` is required")),
+    };
+    let time = finite(cmd, time, "time")?;
+    if !(0.0..=1e6).contains(&time) {
+        return Err(bad(cmd, "`time` must be 0…1e6 seconds"));
     }
+    let occurrence = occurrence_ref(s, p.get("occurrence"), cmd)?;
+    let translate = match p.get("translate") {
+        None => [0.0, 0.0, 0.0],
+        Some(v) => vec3_finite(cmd, v, "translate")?,
+    };
+    let rotate = match p.get("rotate") {
+        None => IDENTITY_ROTATE,
+        Some(v) => quat_param(cmd, v)?,
+    };
     let name = str_(p, "story");
-    let stories = &mut s.doc_mut().stories;
-    let story = stories.iter_mut().rev().find(|story| name.is_none_or(|n| story.name == n)).ok_or_else(|| bad(cmd, "create a storyboard first"))?;
-    story.keys.push(StoryKey { time, occurrence, translate: at });
-    Ok(json!({"keys": story.keys.len()}))
+    if let Some(n) = name
+        && (n.is_empty() || n.len() > 200)
+    {
+        return Err(bad(cmd, "the storyboard name is not usable"));
+    }
+    let features = s.doc.features.len();
+    let occurrences = s.doc.occurrences.clone();
+    let pending = s.pending_moves.clone();
+    let assembly = s.doc.assembly.clone();
+    let count = {
+        let stories = &mut s.doc_mut().stories;
+        let story =
+            stories.iter_mut().rev().find(|story| name.is_none_or(|n| story.name == n)).ok_or_else(|| bad(cmd, "create a storyboard first"))?;
+        if story.keys.len() >= 4096 {
+            return Err(bad(cmd, "too many keys"));
+        }
+        story.keys.push(StoryKey { time, occurrence, translate, rotate });
+        story.keys.len()
+    };
+    if !assembly_same(s, features, &occurrences, &pending, &assembly) {
+        return Err(bad(cmd, "the key moved the assembly"));
+    }
+    Ok(json!({"keys": count}))
 }
 
 fn anim_play(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "anim.play";
+    require_assembly(s, cmd)?;
+    let doc = Arc::as_ptr(&s.doc);
+    let pending = s.pending_moves.clone();
     let name = str_(p, "story");
-    let story = s.doc.stories.iter().rev().find(|story| name.is_none_or(|n| story.name == n)).ok_or_else(|| bad("anim.play", "no storyboard"))?;
-    let occurrences = s.doc.occurrences.len();
-    Ok(json!({"keys": story.keys.len(), "occurrences": occurrences}))
+    let story = s.doc.stories.iter().rev().find(|story| name.is_none_or(|n| story.name == n)).ok_or_else(|| bad(cmd, "no storyboard"))?;
+    let keys = story.keys.clone();
+    let story_name = story.name.clone();
+    keys_resolve(s, &keys, cmd)?;
+    let time = match p.get("time") {
+        None => 0.0,
+        Some(v) => finite(cmd, v.as_f64().ok_or_else(|| bad(cmd, "`time` must be a number"))?, "time")?,
+    };
+    if time.abs() > 1e9 {
+        return Err(bad(cmd, "`time` is too large"));
+    }
+    let mut poses = Vec::new();
+    for occurrence in s.doc.occurrences.iter().take(10_000) {
+        let (translate, rotate) = if keys.iter().any(|key| key.occurrence == occurrence.id) {
+            pose_of(&keys, occurrence.id, time, cmd)?
+        } else {
+            ([0.0, 0.0, 0.0], IDENTITY_ROTATE)
+        };
+        poses.push(json!({"occurrence": occurrence.id, "name": occurrence.name, "translate": translate, "rotate": rotate}));
+    }
+    if !doc_unchanged(s, doc, &pending) {
+        return Err(bad(cmd, "playback moved the assembly"));
+    }
+    let (start, end) = key_span(&keys);
+    Ok(json!({"story": story_name, "time": time, "keys": keys.len(), "start": start, "end": end, "poses": poses}))
 }
 
 fn anim_publish(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "anim.publish";
-    let path = str_(p, "path").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`path` is required"))?;
-    if s.doc.stories.is_empty() {
-        return Err(bad(cmd, "create a storyboard first"));
+    let path = usable_path(p, cmd)?;
+    require_assembly(s, cmd)?;
+    let name = str_(p, "story");
+    let story = s.doc.stories.iter().rev().find(|story| name.is_none_or(|n| story.name == n)).ok_or_else(|| bad(cmd, "create a storyboard first"))?;
+    let keys = story.keys.clone();
+    keys_resolve(s, &keys, cmd)?;
+    if is_video(path) {
+        return Err(bad(cmd, "not supported yet: video. Publish a png image or an image sequence"));
     }
-    if s.doc.components.is_empty() && s.doc.occurrences.is_empty() && s.model.state().bodies.is_empty() {
-        return Err(bad(cmd, "the assembly has nothing to show"));
+    let frames = match p.get("frames") {
+        None => {
+            let (start, end) = key_span(&keys);
+            if end - start <= 1e-9 { 1 } else { 4 }
+        }
+        Some(v) => {
+            let n = v.as_u64().filter(|n| (1..=24).contains(n)).ok_or_else(|| bad(cmd, "`frames` must be 1…24"))?;
+            n as usize
+        }
+    };
+    let doc = Arc::as_ptr(&s.doc);
+    let pending = s.pending_moves.clone();
+    let paints = body_paints(s, cmd)?;
+    let origins = origins_of(s);
+    let stored = s.doc.render_scene.clone().unwrap_or(RenderScene { color: [1.0, 1.0, 1.0], intensity: 1.0, focal: 50.0 });
+    let (start, end) = key_span(&keys);
+    let mut paths = Vec::new();
+    for index in 0..frames {
+        let t = if frames <= 1 { start } else { start + (end - start) * index as f64 / (frames - 1) as f64 };
+        let poses = pose_map(&keys, t, cmd)?;
+        let canvas = render_paints(&paints, &poses, &origins, (stored.color, stored.intensity), stored.focal, cmd)?;
+        let file = sequence_path(path, index, frames);
+        write_png(cmd, &file, canvas)?;
+        paths.push(file);
     }
-    let before = s.doc.occurrences.clone();
-    let rgba = [200u8, 200, 200, 255].repeat(16);
-    let bytes = solidcraft_render::png(4, 4, rgba).ok_or_else(|| bad(cmd, "could not encode the frame"))?;
-    std::fs::write(path, bytes).map_err(|e| bad(cmd, e.to_string()))?;
-    if s.doc.occurrences != before {
+    if !doc_unchanged(s, doc, &pending) {
         return Err(bad(cmd, "publishing moved the assembly"));
     }
-    Ok(json!({"path": path, "frames": 1}))
+    Ok(json!({"path": path, "frames": frames, "paths": paths}))
 }
 
 fn ecad_schematic(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1871,6 +2609,10 @@ fn gen_promote(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 #[path = "sim_tests.rs"]
 mod sim_tests;
+
+#[cfg(test)]
+#[path = "present_tests.rs"]
+mod present_tests;
 
 fn parts_list(s: &mut Session, p: &Value) -> Result<Value> {
     super::drawing::parts_list(s, p)

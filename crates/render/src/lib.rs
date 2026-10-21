@@ -7,12 +7,14 @@
 mod camera;
 mod curve_display;
 mod field;
+mod pbr;
 mod raster;
 mod shell;
 
 pub use camera::{Camera, CameraAnim, Mat4, Quat, StandardView, UpAxis, ease_in_out};
 pub use curve_display::{PixelCurveView, SampledPath, SamplingBudget, SamplingQuality, sample_segment, sample_segment_unclipped};
 pub use field::{result_colour, result_colour_value, result_ramp_png};
+pub use pbr::{StudioLight, studio};
 pub use raster::{Canvas, Rgb, SECTION_CAP, Scene, SceneLine, SceneMesh, png, render, render_png, render_transparent};
 pub use shell::{
     DragDir, PickKind, Pickable, SelectCompose, SelectFilter, VisualStyle, compose_selection, depth_stack, eye_direction, select_freeform,

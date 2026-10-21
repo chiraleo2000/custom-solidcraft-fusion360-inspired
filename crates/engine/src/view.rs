@@ -182,6 +182,12 @@ pub fn scene_with_section_and_sketch_sampler(
         cap: Some(colors::SECTION_CAP),
         ..Default::default()
     };
+    if let Some(env) = &s.doc.render_scene {
+        let neutral = env.color.iter().all(|c| (c - 1.0).abs() <= 1e-9) && (env.intensity - 1.0).abs() <= 1e-9;
+        if !neutral {
+            sc.light = Some((env.color, env.intensity));
+        }
+    }
     let b = bounds(s);
     sc.radius = (b.diagonal() * 0.5).max(cam.half_height()).max(10.0) + b.center().dist(cam.target);
     // Grid on the ground plane (XY with Z up, XZ with Y up).
@@ -226,14 +232,19 @@ pub fn scene_with_section_and_sketch_sampler(
         // The body's appearance (or imported colour) and faces with looks of their own, as in
         // the viewport.
         let to8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let look = if selected { None } else { s.doc.model_body_look(body) };
         let color =
             if selected { colors::BODY_SELECTED } else { s.doc.body_color(body).map_or(colors::BODY, |[r, g, b]| Rgb(to8(r), to8(g), to8(b))) };
-        let face_colors = if selected {
-            Vec::new()
+        let (metalness, roughness) = look.as_ref().map(|l| (l.metalness, l.roughness)).unwrap_or((0.0, 0.5));
+        let (face_colors, face_shade) = if selected {
+            (Vec::new(), Vec::new())
         } else {
-            s.doc.face_colors(body).into_iter().map(|(f, l)| (f as u32, Rgb(l.color[0], l.color[1], l.color[2]))).collect()
+            let faces = s.doc.face_colors(body);
+            let colors = faces.iter().map(|(f, l)| (*f as u32, Rgb(l.color[0], l.color[1], l.color[2]))).collect();
+            let shade = faces.iter().map(|(f, l)| (*f as u32, l.metalness, l.roughness)).collect();
+            (colors, shade)
         };
-        sc.meshes.push(SceneMesh { mesh: Arc::clone(&mesh), color, face_colors });
+        sc.meshes.push(SceneMesh { mesh: Arc::clone(&mesh), color, metalness, roughness, face_colors, face_shade });
         for (i, e) in mesh.edges.iter().enumerate() {
             if !mesh.shaded_edge_visible(i) {
                 continue;

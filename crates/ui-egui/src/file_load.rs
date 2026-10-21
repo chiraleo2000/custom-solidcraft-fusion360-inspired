@@ -161,7 +161,14 @@ fn saved_picture(preview: solidcraft_engine::io::DesignPreview) -> Option<egui::
         }
         bounds = bounds.union(&mesh.bounds());
         let [r, g, b] = cached.color.unwrap_or([0.69, 0.73, 0.78]).map(|c| (c * 255.0).round() as u8);
-        scene.meshes.push(SceneMesh { mesh: Arc::new(mesh), color: Rgb(r, g, b), face_colors: Vec::new() });
+        scene.meshes.push(SceneMesh {
+            mesh: Arc::new(mesh),
+            color: Rgb(r, g, b),
+            metalness: 0.0,
+            roughness: 0.5,
+            face_colors: Vec::new(),
+            face_shade: Vec::new(),
+        });
     }
     if bounds.is_empty() {
         return None;

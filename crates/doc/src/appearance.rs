@@ -136,14 +136,33 @@ pub const LIBRARY: [(&str, [u8; 3], f64); 20] = [
     ("Paint - Gloss White", [246, 246, 244], 1.0),
 ];
 
+/// Metalness and roughness for a library or physical-material name. Code only: no texture file.
+fn pbr_preset(name: &str) -> (f64, f64) {
+    let n = name.to_ascii_lowercase();
+    if n.contains("glass") {
+        (0.0, 0.08)
+    } else if n.contains("rubber") {
+        (0.0, 0.9)
+    } else if n.contains("oak") || n.contains("wood") {
+        (0.0, 0.7)
+    } else if n.contains("polished") || n.contains("brass") || n.contains("copper") {
+        (1.0, 0.18)
+    } else if n.contains("aluminum") || n.contains("steel") || n.contains("iron") || n.contains("titanium") {
+        (1.0, 0.42)
+    } else if n.contains("paint") {
+        (0.0, 0.25)
+    } else if n.contains("abs") || n.contains("plastic") || n.contains("pla") || n.contains("nylon") || n.contains("polycarbonate") {
+        (0.0, 0.55)
+    } else {
+        (0.0, 0.5)
+    }
+}
+
 /// A library appearance by name (case-insensitive).
 pub fn library(name: &str) -> Option<Look> {
-    LIBRARY.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(name.trim())).map(|(n, c, o)| Look {
-        name: n.to_string(),
-        color: *c,
-        opacity: *o,
-        metalness: 0.0,
-        roughness: 0.5,
+    LIBRARY.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(name.trim())).map(|(n, c, o)| {
+        let (metalness, roughness) = pbr_preset(n);
+        Look { name: n.to_string(), color: *c, opacity: *o, metalness, roughness }
     })
 }
 
@@ -151,7 +170,8 @@ pub fn library(name: &str) -> Option<Look> {
 pub fn material_look(material: &str) -> Option<Look> {
     let color = crate::material_color(material)?;
     let opacity = if material == "Glass" { 0.25 } else { 1.0 };
-    Some(Look { name: material.to_string(), color, opacity, metalness: 0.0, roughness: 0.5 })
+    let (metalness, roughness) = pbr_preset(material);
+    Some(Look { name: material.to_string(), color, opacity, metalness, roughness })
 }
 
 impl Document {
@@ -321,8 +341,12 @@ mod tests {
     #[test]
     fn library_and_materials() {
         assert_eq!(library("abs - red").map(|l| l.color), Some([196, 40, 40]));
+        assert!(library("ABS - Red").is_some_and(|l| l.metalness == 0.0 && l.roughness > 0.5));
+        assert!(library("Brass - Polished").is_some_and(|l| l.metalness > 0.5 && l.roughness < 0.3));
+        assert!(library("Rubber - Black").is_some_and(|l| l.roughness > 0.8));
         assert!(library("Glass - Clear").is_some_and(|l| l.opacity < 0.5));
         assert!(library("nope").is_none());
+        assert!(material_look("Aluminum").is_some_and(|l| l.metalness > 0.5));
         assert_eq!(material_look("Brass").map(|l| l.color), crate::material_color("Brass"));
         assert!(material_look("Glass").is_some_and(|l| l.opacity < 1.0));
         assert_eq!(Look::custom([1, 2, 3], 7.0).opacity, 1.0);

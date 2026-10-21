@@ -177,8 +177,10 @@ fn a_pocket_reports_removed_stock_and_a_short_is_only_a_report() {
     let sim = run(&mut s, "cam.simulate", json!({}));
     assert!(rel(sim["removed"].as_f64().unwrap(), 18.0 * 18.0 * 10.0) < 1e-6, "{sim}");
     let occurrences = s.doc.occurrences.clone();
-    run(&mut s, "anim.storyboard", json!({"name": "Explode"}));
-    run(&mut s, "anim.key", json!({"time": 1, "occurrence": 0, "translate": [0, 0, 10]}));
+    let story = s.execute("anim.storyboard", &json!({"name": "Explode"})).unwrap_err();
+    assert!(story.to_string().contains("no components"), "{story}");
+    let keyed = s.execute("anim.key", &json!({"time": 1, "occurrence": 0, "translate": [0, 0, 10]})).unwrap_err();
+    assert!(keyed.to_string().contains("no components"), "{keyed}");
     assert_eq!(s.doc.occurrences, occurrences);
     run(&mut s, "ecad.schematic", json!({"parts": ["U1"]}));
     run(&mut s, "ecad.wire", json!({"a": "vcc", "b": "mid"}));
@@ -241,8 +243,9 @@ fn adaptive_stays_outside_and_a_board_pushes_to_3d() {
     assert_eq!(shot["varied"], true, "{shot}");
     let png = std::fs::read(&shaded).unwrap();
     assert!(png.starts_with(b"\x89PNG"), "not a png");
-    run(&mut s, "anim.storyboard", json!({}));
     let places = s.doc.occurrences.clone();
+    let story = run(&mut s, "anim.storyboard", json!({}));
+    assert_eq!(story["source"], "empty", "{story}");
     run(&mut s, "anim.publish", json!({"path": frame.to_string_lossy()}));
     assert_eq!(s.doc.occurrences, places);
     assert!(std::fs::metadata(&frame).unwrap().len() > 8);

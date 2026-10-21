@@ -19,8 +19,14 @@ impl Rgb {
 pub struct SceneMesh {
     pub mesh: Arc<Mesh>,
     pub color: Rgb,
+    /// 0 dielectric, 1 metal. Together with roughness `0.5` this keeps the historical studio shade.
+    pub metalness: f64,
+    /// 0 smooth, 1 rough.
+    pub roughness: f64,
     /// Faces in colours of their own: (B-rep face index, colour).
     pub face_colors: Vec<(u32, Rgb)>,
+    /// Per-face metalness and roughness. A face missing here uses the mesh values.
+    pub face_shade: Vec<(u32, f64, f64)>,
 }
 
 pub struct SceneLine {
@@ -45,6 +51,8 @@ pub struct Scene {
     pub clip: Option<(Vec3, f64)>,
     /// The colour the section cap is tinted toward (default: [`SECTION_CAP`]).
     pub cap: Option<Rgb>,
+    /// Key-light colour and intensity. `None` is white at intensity 1, the historical studio.
+    pub light: Option<([f64; 3], f64)>,
 }
 
 /// The section cap's default tint, as in the viewport.
@@ -76,7 +84,9 @@ impl Canvas {
     }
 }
 
-fn shade(n: Vec3, view_dir: Vec3, base: [f64; 3]) -> [f64; 3] {
+/// The shade used before metallic-roughness inputs. Kept so a dielectric at roughness 0.5 under
+/// a white light still matches existing snapshots.
+fn shade_legacy(n: Vec3, view_dir: Vec3, base: [f64; 3]) -> [f64; 3] {
     let n = if n.dot(view_dir) < 0.0 { -n } else { n };
     let key = (view_dir * 0.8 + Vec3::new(-0.3, 0.2, 0.6)).normalized().unwrap_or(view_dir);
     let diff = n.dot(key).max(0.0);
@@ -85,6 +95,23 @@ fn shade(n: Vec3, view_dir: Vec3, base: [f64; 3]) -> [f64; 3] {
     let spec = n.dot(h).max(0.0).powi(40) * 0.25;
     let k = 0.42 + 0.38 * diff + 0.25 * fill;
     [(base[0] * k + spec).min(1.0), (base[1] * k + spec).min(1.0), (base[2] * k + spec).min(1.0)]
+}
+
+fn neutral_light(light: Option<([f64; 3], f64)>) -> bool {
+    match light {
+        None => true,
+        Some((color, intensity)) => (intensity - 1.0).abs() <= 1e-9 && color.iter().all(|c| c.is_finite() && (c - 1.0).abs() <= 1e-9),
+    }
+}
+
+fn shade(n: Vec3, view_dir: Vec3, base: [f64; 3], metalness: f64, roughness: f64, light: Option<([f64; 3], f64)>) -> [f64; 3] {
+    let metalness = if metalness.is_finite() { metalness.clamp(0.0, 1.0) } else { 0.0 };
+    let roughness = if roughness.is_finite() { roughness.clamp(0.0, 1.0) } else { 0.5 };
+    if metalness <= 1e-9 && (roughness - 0.5).abs() <= 1e-9 && neutral_light(light) {
+        return shade_legacy(n, view_dir, base);
+    }
+    let (tint, intensity) = light.unwrap_or(([1.0, 1.0, 1.0], 1.0));
+    crate::pbr::shade_pbr(n, view_dir, base, metalness, roughness, tint, intensity)
 }
 
 /// Render a scene with the camera into an RGBA canvas of `w × h` pixels.
@@ -127,6 +154,8 @@ pub fn render(scene: &Scene, cam: &Camera, w: usize, h: usize) -> Canvas {
         for (ti, t) in m.triangles.iter().enumerate() {
             let face = m.tri_face.get(ti).copied();
             let base = sm.face_colors.iter().find(|(f, _)| Some(*f) == face).map_or(body, |(_, c)| c.f());
+            let (metal, rough) =
+                face.and_then(|f| sm.face_shade.iter().find(|(id, _, _)| *id == f).map(|(_, m, r)| (*m, *r))).unwrap_or((sm.metalness, sm.roughness));
             let wp = t.map(|k| m.positions.get(k as usize).copied().unwrap_or_default());
             // Seen from inside (only where a section cuts the body open).
             let to_eye = if cam.fov > 0.0 { cam.eye() - wp[0] } else { view_dir };
@@ -187,7 +216,7 @@ pub fn render(scene: &Scene, cam: &Camera, w: usize, h: usize) -> Canvas {
                             c.put(x, y, tinted.map(|v| v * k), 1.0);
                             continue;
                         }
-                        let mut col = shade(n, view_dir, base);
+                        let mut col = shade(n, view_dir, base, metal, rough, scene.light);
                         let ndv = n.dot(view_dir).abs();
                         if curved && ndv < 0.14 {
                             let a = 1.0 - ndv / 0.14;
@@ -364,12 +393,20 @@ mod tests {
             edge_faces: vec![],
         };
         let scene = Scene {
-            meshes: vec![SceneMesh { mesh: Arc::new(mesh), color: Rgb(200, 30, 30), face_colors: Vec::new() }],
+            meshes: vec![SceneMesh {
+                mesh: Arc::new(mesh),
+                color: Rgb(200, 30, 30),
+                metalness: 0.0,
+                roughness: 0.5,
+                face_colors: Vec::new(),
+                face_shade: Vec::new(),
+            }],
             lines: vec![],
             background: None,
             radius: 20.0,
             clip: None,
             cap: None,
+            light: None,
         };
         let mut cam = Camera { distance: 50.0, ..Default::default() };
         cam.set_view(StandardView::Front);
@@ -379,5 +416,42 @@ mod tests {
         assert!(render_png(&scene, &cam, 16, 16).unwrap().starts_with(&[0x89, b'P', b'N', b'G']));
         // Hostile sizes are clamped.
         assert_eq!(render(&scene, &cam, 0, usize::MAX).w, 1);
+        let n = Vec3::new(0.0, -1.0, 0.2).normalized().unwrap();
+        let view = Vec3::new(0.0, -1.0, 0.0);
+        let base = [0.8, 0.25, 0.2];
+        assert_eq!(shade(n, view, base, 0.0, 0.5, None), shade_legacy(n, view, base));
+        assert_ne!(shade(n, view, base, 1.0, 0.12, None), shade(n, view, base, 0.0, 0.92, None));
+    }
+
+    #[test]
+    fn a_metal_triangle_is_not_the_same_pixels_as_a_rough_one() {
+        let mesh = Mesh {
+            positions: vec![Vec3::new(-10.0, 0.0, -10.0), Vec3::new(10.0, 0.0, -10.0), Vec3::new(0.0, 0.0, 10.0)],
+            normals: vec![Vec3::new(0.0, -1.0, 0.3); 3],
+            triangles: vec![[0, 1, 2]],
+            tri_face: vec![0],
+            edges: vec![],
+            seams: vec![],
+            smooth_edges: vec![],
+            sharp_edges: vec![],
+            edge_faces: vec![],
+        };
+        let paint = |metalness, roughness| Scene {
+            meshes: vec![SceneMesh {
+                mesh: Arc::new(mesh.clone()),
+                color: Rgb(180, 90, 40),
+                metalness,
+                roughness,
+                face_colors: vec![(0, Rgb(180, 90, 40))],
+                face_shade: vec![(0, metalness, roughness)],
+            }],
+            radius: 20.0,
+            ..Scene::default()
+        };
+        let mut cam = Camera { distance: 40.0, ..Default::default() };
+        cam.set_view(StandardView::Front);
+        let metal = render(&paint(1.0, 0.1), &cam, 48, 48);
+        let rough = render(&paint(0.0, 0.95), &cam, 48, 48);
+        assert_ne!(metal.rgba, rough.rgba);
     }
 }
