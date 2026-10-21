@@ -705,7 +705,7 @@ fn map_creases(n: usize, creases: &[u32]) -> Result<Vec<u32>> {
 }
 
 fn mirror_creases(creases: &[u32], n: usize, plane: &str) -> Result<Vec<u32>> {
-    if n < 2 || n > 400 {
+    if !(2..=400).contains(&n) {
         return Err(KernelError::Invalid("the form cage is not a square grid".into()));
     }
     let mut out = Vec::with_capacity(creases.len().saturating_mul(2));

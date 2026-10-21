@@ -427,9 +427,7 @@ pub fn mesh_section(body: &Body, origin: Vec3, normal: Vec3) -> Result<Vec<Vec<V
     starts.sort();
     let mut loops = Vec::new();
     for start in starts {
-        loop {
-            let Some(list) = adj.get(&start) else { break };
-            let Some(next0) = list.iter().copied().find(|nb| !used.contains(&canon_key(start, *nb))) else { break };
+        while let Some(next0) = adj.get(&start).and_then(|list| list.iter().copied().find(|nb| !used.contains(&canon_key(start, *nb)))) {
             used.insert(canon_key(start, next0));
             let mut ring_keys = vec![start];
             let mut prev = start;
@@ -505,15 +503,15 @@ pub fn mesh_face_groups(body: &Body) -> Result<Vec<(String, usize)>> {
         let link = if list.len() <= 8 { list.len() } else { 2 };
         for (i, &a) in list.iter().enumerate() {
             for &b in list.iter().take(link).skip(i + 1) {
-                if let Some(slot) = neighbors.get_mut(a) {
-                    if !slot.contains(&b) {
-                        slot.push(b);
-                    }
+                if let Some(slot) = neighbors.get_mut(a)
+                    && !slot.contains(&b)
+                {
+                    slot.push(b);
                 }
-                if let Some(slot) = neighbors.get_mut(b) {
-                    if !slot.contains(&a) {
-                        slot.push(a);
-                    }
+                if let Some(slot) = neighbors.get_mut(b)
+                    && !slot.contains(&a)
+                {
+                    slot.push(a);
                 }
             }
         }
