@@ -1285,6 +1285,10 @@ fn is_zero_i8(v: &i8) -> bool {
     *v == 0
 }
 
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
+
 /// Hole shapes.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -2027,8 +2031,22 @@ pub struct StandardPart {
     pub length: Option<f64>,
 }
 
+/// A projected segment on a sheet. Recomputed when the model changes and not stored in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DrawingCurve {
+    pub a: [f64; 2],
+    pub b: [f64; 2],
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub section: bool,
+}
+
 /// A projected view on a drawing sheet.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `curves` and the cache fields are a runtime projection. They are left out of equality and out
+/// of the file so a rebuilt view does not mark a design dirty by itself.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DrawingView {
     pub kind: String,
     pub direction: Vec3,
@@ -2040,19 +2058,146 @@ pub struct DrawingView {
     /// Projected model extent on the sheet, recomputed when the model changes.
     #[serde(default)]
     pub outline: f64,
-    /// Body names that were on the view and are no longer in the model.
+    /// Body names that were on the view and are no longer in the model, plus `parent-view` when
+    /// a derived view's parent is gone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost: Vec<String>,
-    /// Body names the view was created against.
+    /// Body names the view was created against. Empty means every current body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bodies: Vec<String>,
+    /// Index of the view this one was derived from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<usize>,
+    /// `right`, `left`, `above`, `below`, or `same` when the direction follows the parent.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub side: String,
+    /// Model point the section plane passes through. Empty means the bodies' centre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<[f64; 3]>,
+    /// Detail window centre in the parent view's unscaled local coordinates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f64; 2]>,
+    /// Detail window radius in unscaled view millimetres. Zero means the whole view.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub radius: f64,
+    /// Two stations of a break view, along the sheet's horizontal axis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stations: Vec<f64>,
+    /// Recompute the detail centre from the model bounds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub track_center: bool,
+    #[serde(skip)]
+    pub curves: Vec<DrawingCurve>,
+    #[serde(skip)]
+    pub cache_key: u64,
+    #[serde(skip)]
+    pub cache_valid: bool,
 }
 
-/// A note or dimension on a drawing sheet.
+impl PartialEq for DrawingView {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.direction == other.direction
+            && self.origin == other.origin
+            && self.scale == other.scale
+            && self.hidden == other.hidden
+            && self.outline == other.outline
+            && self.lost == other.lost
+            && self.bodies == other.bodies
+            && self.parent == other.parent
+            && self.side == other.side
+            && self.through == other.through
+            && self.center == other.center
+            && self.radius == other.radius
+            && self.stations == other.stations
+            && self.track_center == other.track_center
+    }
+}
+
+impl DrawingView {
+    pub fn plain(kind: impl Into<String>, direction: Vec3, origin: [f64; 2]) -> Self {
+        Self {
+            kind: kind.into(),
+            direction,
+            origin,
+            scale: String::new(),
+            hidden: false,
+            outline: 0.0,
+            lost: Vec::new(),
+            bodies: Vec::new(),
+            parent: None,
+            side: String::new(),
+            through: None,
+            center: None,
+            radius: 0.0,
+            stations: Vec::new(),
+            track_center: false,
+            curves: Vec::new(),
+            cache_key: 0,
+            cache_valid: false,
+        }
+    }
+}
+
+/// A note, dimension, center mark, or balloon on a drawing sheet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DrawingNote {
     pub text: String,
     pub at: [f64; 2],
+    /// `dimension`, `center_mark`, `centerline`, `note`, `leader`, `balloon`, or `title`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// Body name a dimension or center mark follows, or the balloon's component token.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target: String,
+    /// `x`, `y`, or `z` for a linear dimension.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub axis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<u64>,
+    /// Parts-list row a balloon points at, starting at 1.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub item: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lost: bool,
+    /// Last measured length in millimetres.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub measured: f64,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+impl DrawingNote {
+    pub fn plain(text: impl Into<String>, at: [f64; 2]) -> Self {
+        Self {
+            text: text.into(),
+            at,
+            kind: String::new(),
+            target: String::new(),
+            axis: String::new(),
+            view: None,
+            component: None,
+            item: 0,
+            lost: false,
+            measured: 0.0,
+        }
+    }
+}
+
+/// One row of a drawing parts list, taken from the component tree.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DrawingPart {
+    pub item: u32,
+    pub component: u64,
+    pub name: String,
+    #[serde(default)]
+    pub qty: u32,
+    #[serde(default)]
+    pub parent: u64,
 }
 
 /// One drawing sheet.
@@ -2067,6 +2212,32 @@ pub struct DrawingSheet {
     /// `first_angle` or `third_angle`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub standard: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// `A4` or `A3` (landscape ISO 216).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub paper: String,
+    /// `filled` or `open` — SolidCraft's own arrow style.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub arrows: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<DrawingPart>,
+}
+
+impl DrawingSheet {
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            views: Vec::new(),
+            notes: Vec::new(),
+            svg: String::new(),
+            standard: String::new(),
+            title: String::new(),
+            paper: String::new(),
+            arrows: String::new(),
+            parts: Vec::new(),
+        }
+    }
 }
 
 /// A tool in a machining setup.

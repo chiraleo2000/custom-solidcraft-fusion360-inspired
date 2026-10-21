@@ -10,6 +10,7 @@
 
 pub mod brep;
 pub mod bspline;
+pub mod drawing;
 pub mod env;
 pub mod fill;
 mod mesh;

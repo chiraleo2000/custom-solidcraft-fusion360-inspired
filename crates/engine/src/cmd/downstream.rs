@@ -1228,20 +1228,7 @@ fn ecad_export(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn drawing_dxf(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "drawing.export_dxf";
-    let path = str_(p, "path").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`path` is required"))?;
-    let i = super::drawing::sheet_index(s, p).map_err(|e| bad(cmd, e.to_string()))?;
-    let segs = super::drawing::model_segments(s, i);
-    if segs.is_empty() {
-        return Err(bad(cmd, "the drawing has no model edges"));
-    }
-    let mut dxf = String::from("0\nSECTION\n2\nENTITIES\n");
-    for (a, b) in &segs {
-        dxf.push_str(&format!("0\nLINE\n8\n0\n10\n{:.4}\n20\n{:.4}\n11\n{:.4}\n21\n{:.4}\n", a[0], a[1], b[0], b[1]));
-    }
-    dxf.push_str("0\nENDSEC\n0\nEOF\n");
-    std::fs::write(path, &dxf).map_err(|e| bad(cmd, e.to_string()))?;
-    Ok(json!({"path": path, "lines": segs.len()}))
+    super::drawing::export_dxf(s, p)
 }
 
 fn gen_study(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1330,43 +1317,14 @@ fn gen_promote(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"body": candidate}))
 }
 
-fn parts_list(s: &mut Session, _p: &Value) -> Result<Value> {
-    Ok(json!({"rows": s.doc.components.len()}))
+fn parts_list(s: &mut Session, p: &Value) -> Result<Value> {
+    super::drawing::parts_list(s, p)
 }
 
 fn drawing_detail(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "drawing.detail";
-    let scale = p.get("scale").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`scale` is required"))?;
-    if !(scale.is_finite() && scale > 0.0) {
-        return Err(bad(cmd, "scale must be positive"));
-    }
-    let i = super::drawing::sheet_index(s, p).map_err(|e| bad(cmd, e.to_string()))?;
-    let origin = p.get("origin").and_then(crate::params::vec2).map(|v| [v.x, v.y]).unwrap_or([0.0, 0.0]);
-    let drawings = &mut s.doc_mut().drawings;
-    let sheet = drawings.get_mut(i).ok_or_else(|| bad(cmd, "no drawing sheet"))?;
-    sheet.views.push(solidcraft_doc::DrawingView {
-        kind: "detail".into(),
-        direction: solidcraft_geom::Vec3::Z,
-        origin,
-        scale: scale.to_string(),
-        hidden: false,
-        outline: 0.0,
-        lost: Vec::new(),
-        bodies: Vec::new(),
-    });
-    Ok(json!({"views": sheet.views.len()}))
+    super::drawing::detail(s, p)
 }
 
 fn title_block(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "drawing.title_block";
-    let size = str_(p, "size").unwrap_or("A4");
-    if !matches!(size, "A4" | "A3") {
-        return Err(bad(cmd, "size must be A4 or A3"));
-    }
-    let title = str_(p, "title").unwrap_or("SolidCraft").to_string();
-    let i = super::drawing::sheet_index(s, p).map_err(|e| bad(cmd, e.to_string()))?;
-    let drawings = &mut s.doc_mut().drawings;
-    let sheet = drawings.get_mut(i).ok_or_else(|| bad(cmd, "no drawing sheet"))?;
-    sheet.notes.push(solidcraft_doc::DrawingNote { text: format!("{title} {size}"), at: [10.0, 10.0] });
-    Ok(json!({"title": title, "size": size}))
+    super::drawing::title_block(s, p)
 }

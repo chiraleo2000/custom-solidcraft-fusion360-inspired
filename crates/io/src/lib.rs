@@ -20,6 +20,8 @@ mod svg;
 mod threemf;
 pub mod vfs;
 
+mod drawing_out;
+pub use drawing_out::{DrawKind, DrawSeg, DrawText, write_drawing_dxf, write_drawing_pdf, write_drawing_svg};
 pub use dxf::{read_dxf, write_dxf};
 pub use legacy_dir::adopt_legacy_dir;
 pub use safe_write::{backup_path, write_atomic};
