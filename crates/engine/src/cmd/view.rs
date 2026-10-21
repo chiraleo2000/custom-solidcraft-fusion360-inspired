@@ -286,4 +286,69 @@ mod tests {
         assert_eq!(s.doc.to_json(), before);
         assert_eq!(cases, 26);
     }
+
+    fn topology(s: &Session) -> Vec<(String, usize)> {
+        s.world_state().bodies.iter().map(|b| (b.name.clone(), b.body.face_count())).collect()
+    }
+
+    /// Feature: fusion360-feature-parity, Property 17: Visual-style switches never change geometry or timeline
+    #[test]
+    fn property_17_visual_style_does_not_change_the_document() {
+        let styles = ["shaded", "shaded_edges", "hidden_edges", "wireframe"];
+        let mut cases = 0usize;
+        for n in 0..120 {
+            let mut s = Session::default();
+            let len = 4 + (n % 9) as i64;
+            s.execute("solid.box", &json!({"length": len, "width": 5, "height": 6, "body_name": "Box"})).expect("box");
+            let before = s.doc.to_json();
+            let faces = topology(&s);
+            let undo = s.undo.len();
+            let style = styles[n % styles.len()];
+            let out = s.execute("view.visual_style", &json!({"style": style})).expect("style");
+            assert_eq!(out["style"], json!(style));
+            assert_eq!(s.doc.to_json(), before);
+            assert_eq!(topology(&s), faces);
+            assert_eq!(s.undo.len(), undo);
+            let kept = s.visual_style;
+            assert!(s.execute("view.visual_style", &json!({"style": format!("nope-{n}")})).is_err());
+            assert_eq!(s.visual_style, kept);
+            assert_eq!(s.doc.to_json(), before);
+            assert_eq!(s.undo.len(), undo);
+            cases += 1;
+        }
+        assert!(cases >= 100, "property ran {cases} times");
+    }
+
+    /// Feature: fusion360-feature-parity, Property 27: Cycling component colours leaves geometry, the timeline, and appearances unchanged
+    #[test]
+    fn property_27_component_colors_do_not_change_geometry() {
+        let mut cases = 0usize;
+        for n in 0..120 {
+            let mut s = Session::default();
+            let len = 3 + (n % 8) as i64;
+            s.execute("solid.box", &json!({"length": len, "width": 4, "height": 5, "body_name": "Box"})).expect("box");
+            if n % 2 == 0 {
+                s.execute("component.create", &json!({"name": format!("Part{n}")})).expect("component");
+            }
+            let before = s.doc.to_json();
+            let faces = topology(&s);
+            let undo = s.undo.len();
+            let enabled = n % 3 != 0;
+            let out = s.execute("view.component_colors", &json!({"enabled": enabled})).expect("colours");
+            assert_eq!(out["enabled"], json!(enabled));
+            assert_eq!(s.component_colors, enabled);
+            let toggled = s.execute("view.component_colors", &json!({})).expect("toggle");
+            assert_eq!(toggled["enabled"], json!(!enabled));
+            assert_eq!(s.component_colors, !enabled);
+            assert_eq!(s.doc.to_json(), before);
+            assert_eq!(topology(&s), faces);
+            assert_eq!(s.undo.len(), undo);
+            let loaded = solidcraft_doc::Document::from_json(&before).expect("reload");
+            let cold = Session::new(loaded);
+            assert!(!cold.component_colors);
+            assert_eq!(cold.doc.to_json(), before);
+            cases += 1;
+        }
+        assert!(cases >= 100, "property ran {cases} times");
+    }
 }

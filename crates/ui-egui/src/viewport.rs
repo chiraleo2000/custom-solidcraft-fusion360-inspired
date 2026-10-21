@@ -337,8 +337,7 @@ fn build_scene(app: &SolveApp) -> GpuScene {
             s.active_component != 0 && !s.doc.component_within(b.component, s.active_component)
         };
         let base = if app.session.component_colors && b.component != 0 {
-            let n = b.component.wrapping_mul(1103515245).wrapping_add(12345);
-            Color32::from_rgb(70 + (n % 150) as u8, 60 + ((n >> 8) % 150) as u8, 50 + ((n >> 16) % 140) as u8)
+            component_tint(&tk, b.component)
         } else {
             body_color(&s.doc, b).unwrap_or(tk.body)
         };
@@ -1229,7 +1228,27 @@ pub fn candidates(app: &SolveApp, hits: &[Hit]) -> Vec<(Hit, Sel)> {
 }
 
 fn pick_kind_off(app: &SolveApp, kind: &str) -> bool {
-    if app.session.select_filter != 0 { !app.session.allows_pick(kind) } else { app.ui.pick_off.iter().any(|item| item == kind) }
+    let local = app.ui.pick_off.iter().any(|item| item == kind);
+    if app.session.select_filter == 0 {
+        return local;
+    }
+    let coarse = matches!(kind, "face" | "faces" | "edge" | "edges" | "vertex" | "vertices" | "body" | "bodies" | "component" | "components");
+    let sketch = matches!(kind, "sketch" | "sketch_curve" | "sketch_curves" | "sketch_points");
+    // Sketch points and curves share one engine bit. A partial denylist stays local while that bit is on.
+    if sketch && app.session.allows_pick("sketch_curve") {
+        return local;
+    }
+    if coarse || sketch {
+        return !app.session.allows_pick(kind) || local;
+    }
+    local
+}
+
+/// Per-component display tint from the theme. It is a view setting, not a stored appearance.
+fn component_tint(t: &Tokens, component: u64) -> Color32 {
+    let palette = [t.accent, t.sketch_accent, t.preview_add, t.warning, t.manipulator, t.sel_face, t.body_selected, t.section_cap];
+    let n = usize::try_from(component % palette.len() as u64).unwrap_or(0);
+    palette.get(n).copied().unwrap_or(t.body)
 }
 
 /// What the selection filter lets a click pick with no dialog.
@@ -2278,13 +2297,13 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         let _ = app.session.execute("sketch.drag_end", &json!({}));
     }
     if ui.input(|i| i.key_pressed(egui::Key::Num1)) {
-        let _ = app.session.execute("view.select_mode", &json!({"mode": "box"}));
+        let _ = app.run("view.select_mode", json!({"mode": "box"}));
     }
     if ui.input(|i| i.key_pressed(egui::Key::Num2)) {
-        let _ = app.session.execute("view.select_mode", &json!({"mode": "lasso"}));
+        let _ = app.run("view.select_mode", json!({"mode": "lasso"}));
     }
     if ui.input(|i| i.key_pressed(egui::Key::Num3)) {
-        let _ = app.session.execute("view.select_mode", &json!({"mode": "paint"}));
+        let _ = app.run("view.select_mode", json!({"mode": "paint"}));
     }
     // Box, lasso or paint selection: a primary drag on the model when no navigation mode is on.
     if app.tool.is_none()
@@ -2998,13 +3017,12 @@ fn axis_view(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     }
     for (i, (name, d, at, depth)) in tips.iter().enumerate() {
         let col = if d.x != 0.0 {
-            colors::AXIS_X
+            t.axis_x
         } else if d.y != 0.0 {
-            colors::AXIS_Y
+            t.axis_y
         } else {
-            colors::AXIS_Z
+            t.axis_z
         };
-        let col = Color32::from_rgb(col.0, col.1, col.2);
         let positive = !name.starts_with('-');
         let ink = if *depth < -0.01 { col.gamma_multiply(0.55) } else { col };
         painter.line_segment([c, *at], Stroke::new(if positive { 2.0 } else { 1.0 }, ink));
@@ -3025,13 +3043,11 @@ fn axis_view(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
         ui.interact(Rect::from_center_size(hover.unwrap_or(c), vec2(2.0, 2.0)), ui.id().with("axis_view_tip"), Sense::hover())
             .on_hover_text(format!("View from {}. Click again to reverse. Drag to orbit; hold Shift to snap.", name.to_uppercase()));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        if ui.input(|i| i.pointer.primary_clicked()) {
-            let frame = app.cam.to_frame(*d);
-            let dir = if app.cam.back().dot(*d) > 0.9999 { -*d } else { *d };
-            let mut to = app.cam.looking_from(dir);
-            if frame.z.abs() > 0.5 {
-                to.yaw = nearest_quarter_turn(app.cam.yaw);
-            }
+        if ui.input(|i| i.pointer.primary_clicked())
+            && let Some(dir) = axis_tip_direction(*d, app.cam.back().dot(*d) > 0.9999)
+            && let Some(to) = app.orient_camera(dir)
+        {
+            // The command owns the orientation. Animation only eases toward that camera.
             if app.preferences.look_at_anim {
                 app.cancel_view_animation();
                 app.viewport.orbit_free = None;
@@ -3050,6 +3066,30 @@ fn axis_view(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     if hr.on_hover_text("Home view").clicked() {
         app.animate_view("home");
     }
+}
+
+/// Integer eye direction for an axis tip. `flip` looks from the opposite end.
+fn axis_tip_direction(world: Vec3, flip: bool) -> Option<[i8; 3]> {
+    let step = |c: f64| -> Option<i8> {
+        if !c.is_finite() {
+            return None;
+        }
+        if c > 0.5 {
+            Some(1)
+        } else if c < -0.5 {
+            Some(-1)
+        } else {
+            Some(0)
+        }
+    };
+    let mut dir = [step(world.x)?, step(world.y)?, step(world.z)?];
+    if dir == [0, 0, 0] {
+        return None;
+    }
+    if flip {
+        dir = [-dir[0], -dir[1], -dir[2]];
+    }
+    Some(dir)
 }
 
 /// At a halfway tie, prefer the square heading nearer the standard plan view.
@@ -3207,6 +3247,10 @@ fn view_menu(app: &mut SolveApp, ui: &mut egui::Ui, button: Rect) -> bool {
             let ground = app.tr("view.ground_shadow").to_string();
             ui.checkbox(&mut app.ui.show_grid, grid);
             ui.checkbox(&mut app.ui.ground_shadow, ground);
+            let mut component_colours = app.session.component_colors;
+            if ui.checkbox(&mut component_colours, "Component colours").changed() {
+                let _ = app.run("view.component_colors", json!({"enabled": component_colours}));
+            }
             ui.separator();
             let s = &mut app.ui.agent_cursor;
             let show = ui.checkbox(&mut s.show, "Show Agent Cursor");
@@ -4422,9 +4466,9 @@ mod tests {
         h.run(&json!([
             {"call":"ui.view","params":{"view":"home"}},
             {"click":{"handle":"axis_view:z"}},
-            {"expect":{"camera":{"pitch_deg":90,"yaw_deg":0}}},
+            {"expect":{"camera":{"pitch_deg":90,"yaw_deg":-90}}},
             {"click":{"handle":"axis_view:z"}},
-            {"expect":{"camera":{"pitch_deg":-90,"yaw_deg":0}}},
+            {"expect":{"camera":{"pitch_deg":-90,"yaw_deg":-90}}},
             {"call":"ui.view","params":{"view":"front"}}
         ]))
         .unwrap();
@@ -4434,6 +4478,28 @@ mod tests {
         assert!(h.app.viewport.axis_drag.is_none());
         assert!(h.app.viewport.orbit_free.is_none());
         assert!(h.app.viewport.boxsel.is_none());
+    }
+
+    #[test]
+    fn axis_tip_click_matches_view_orient_and_leaves_the_design() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        let doc = h.app.session.doc.to_json();
+        let undo = h.app.session.undo.len();
+        let faces = h.app.session.world_state().bodies.iter().map(|b| b.body.face_count()).collect::<Vec<_>>();
+        h.call("ui.view", json!({"view": "front"}));
+        let cam = h.app.cam;
+        let commanded = h.app.orient_camera([0, 0, 1]).expect("view.orient");
+        assert_eq!(h.app.cam, cam, "view.orient returns a camera and does not move the live one");
+        let p = crate::scenario::handle_at("axis_view:z").expect("axis tip");
+        h.call("ui.click", json!({"x": p.x, "y": p.y}));
+        assert!(h.app.cam.back().dist(commanded.back()) < 1e-5, "tip click adopts the commanded eye");
+        assert_eq!(h.app.cam.target, commanded.target);
+        assert_eq!(h.app.cam.distance, commanded.distance);
+        assert_eq!(h.app.session.doc.to_json(), doc);
+        assert_eq!(h.app.session.undo.len(), undo);
+        let after = h.app.session.world_state().bodies.iter().map(|b| b.body.face_count()).collect::<Vec<_>>();
+        assert_eq!(after, faces);
     }
 
     #[test]

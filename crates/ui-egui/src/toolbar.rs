@@ -995,8 +995,38 @@ fn selection_filter(app: &mut SolveApp, ui: &mut egui::Ui) {
             if !on {
                 app.ui.pick_off.push(k.to_string());
             }
+            let _ = app.run("ui.select_filter", json!({"kinds": coarse_filter_kinds(&app.ui.pick_off)}));
         }
     }
+}
+
+/// Kinds for `ui.select_filter`. An empty list allows every kind. Dimensions and constraints
+/// stay in the local denylist; they are not engine kinds.
+fn coarse_filter_kinds(pick_off: &[String]) -> Vec<&'static str> {
+    let off = |k: &str| pick_off.iter().any(|item| item == k);
+    let face = !off("faces");
+    let edge = !off("edges");
+    let vertex = !off("vertices");
+    let sketch = !off("sketch") && (!off("sketch_curves") || !off("sketch_points"));
+    if face && edge && vertex && sketch {
+        return Vec::new();
+    }
+    let mut kinds = Vec::new();
+    if face {
+        kinds.push("face");
+    }
+    if edge {
+        kinds.push("edge");
+    }
+    if vertex {
+        kinds.push("vertex");
+    }
+    if sketch {
+        kinds.push("sketch_curve");
+    }
+    kinds.push("body");
+    kinds.push("component");
+    kinds
 }
 
 /// A small drop-down caret.
@@ -1067,6 +1097,7 @@ pub fn shortcuts(app: &mut SolveApp, ctx: &egui::Context) {
             }
             Key::S if !mods.shift && !mods.alt => {
                 let at = ctx.input(|i| i.pointer.latest_pos());
+                let _ = app.run("ui.quick_toolbox", json!({}));
                 crate::shortcut_box::open(app, at);
             }
             Key::V => crate::context_menu::toggle_visibility(app),

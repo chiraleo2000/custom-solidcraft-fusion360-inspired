@@ -248,6 +248,61 @@ fn projection_now(app: &SolveApp) -> Option<Proj> {
     app.viewport.rect.map(|r| crate::viewport::projection(app, r))
 }
 
+fn depth_kind(sel: &Sel) -> Option<&'static str> {
+    Some(match sel {
+        Sel::Face { .. } => "face",
+        Sel::Edge { .. } => "edge",
+        Sel::Vertex { .. } => "vertex",
+        Sel::Body { .. } | Sel::Occurrence { .. } => "body",
+        Sel::SketchCurve { .. }
+        | Sel::SketchPoint { .. }
+        | Sel::ExternalSketchCurve { .. }
+        | Sel::ExternalSketchPoint { .. }
+        | Sel::Profile { .. }
+        | Sel::SketchConstraint { .. } => "sketch_curve",
+        _ => return None,
+    })
+}
+
+fn row_depth(app: &SolveApp, row: &Row) -> f64 {
+    let point = match &row.hit {
+        Hit::Face { point, .. } | Hit::Vertex { point, .. } | Hit::Plane { point, .. } => Some(*point),
+        Hit::Edge { mid, .. } => Some(*mid),
+        _ => None,
+    };
+    point.map(|p| p.dist(app.cam.eye())).filter(|d| d.is_finite()).unwrap_or(1.0e6)
+}
+
+/// Ask `ui.select_depth` for front-to-back order, then keep the kind grouping the list already uses.
+fn order_by_depth(app: &mut SolveApp, rows: Vec<Row>) -> Vec<Row> {
+    if rows.len() < 2 {
+        return rows;
+    }
+    let sketching = app.session.active_sketch.is_some();
+    let mut candidates = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let Some(kind) = depth_kind(&row.sel) else { continue };
+        let Some(id) = u64::try_from(i).ok() else { continue };
+        candidates.push(json!({"id": id, "kind": kind, "depth": row_depth(app, row), "min": [0.0, 0.0], "max": [1.0, 1.0]}));
+    }
+    let depth_pos = if candidates.is_empty() {
+        Vec::new()
+    } else {
+        match app.run("ui.select_depth", json!({"candidates": candidates})) {
+            Ok(v) => v
+                .get("ids")
+                .and_then(Value::as_array)
+                .map(|ids| ids.iter().filter_map(|n| n.as_u64().and_then(|n| usize::try_from(n).ok())).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    };
+    let pos = |i: usize| depth_pos.iter().position(|k| *k == i).unwrap_or(i);
+    let mut indexed: Vec<(usize, Row)> = rows.into_iter().enumerate().collect();
+    indexed.sort_by_key(|(i, row)| (rank(&row.sel, sketching), pos(*i)));
+    indexed.into_iter().map(|(_, row)| row).collect()
+}
+
 /// Open the list at a screen point; false (with a status message) when nothing is there.
 pub fn open(app: &mut SolveApp, at: Pos2) -> bool {
     let Some(proj) = projection_now(app) else { return false };
@@ -255,7 +310,7 @@ pub fn open(app: &mut SolveApp, at: Pos2) -> bool {
 }
 
 fn open_with(app: &mut SolveApp, proj: &Proj, at: Pos2) -> bool {
-    let rows = rows(app, proj, at);
+    let rows = order_by_depth(app, rows(app, proj, at));
     if rows.is_empty() {
         app.status = Some(("Nothing to select here".into(), crate::now_ms(), false));
         return false;

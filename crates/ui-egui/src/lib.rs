@@ -410,6 +410,7 @@ impl SolveApp {
         }
         if let Some(s) = v.get("visual_style").and_then(Value::as_u64) {
             self.ui.visual_style = u8::try_from(s.min(3)).unwrap_or(0);
+            self.session.visual_style = self.ui.visual_style;
         }
         // Browser folders the user opened or closed.
         let keys = |k: &str| -> std::collections::BTreeSet<String> {
@@ -474,6 +475,9 @@ impl SolveApp {
             sketch_palette::apply_mode(self, id, v);
             if id == "ui.quick_toolbox" {
                 self.ui.palette_open = true;
+            }
+            if id == "view.visual_style" {
+                self.ui.visual_style = self.session.visual_style;
             }
         }
         match &r {
@@ -914,15 +918,32 @@ impl SolveApp {
                     self.animate_to(to);
                 }
             }
-            other => {
-                let mut to = self.cam;
-                match StandardView::parse(other) {
-                    Some(sv) => to.set_view(sv),
-                    None => return,
+            "back" | "bottom" | "left" => {
+                if let Some(dir) = Self::principal_eye(v)
+                    && let Some(to) = self.orient_camera(dir)
+                {
+                    self.animate_to(to);
                 }
-                self.animate_to(to);
             }
+            _ => {}
         }
+    }
+
+    /// Camera returned by `view.orient`. The live camera stays put until the caller adopts it.
+    pub fn orient_camera(&mut self, direction: [i8; 3]) -> Option<Camera> {
+        let cam = serde_json::to_value(self.cam).ok()?;
+        let out = self.run("view.orient", json!({"direction": direction, "camera": cam})).ok()?;
+        let next: Camera = serde_json::from_value(out.get("camera")?.clone()).ok()?;
+        next.is_valid().then_some(next)
+    }
+
+    fn principal_eye(name: &str) -> Option<[i8; 3]> {
+        Some(match name {
+            "back" => [0, 1, 0],
+            "bottom" => [0, 0, -1],
+            "left" => [-1, 0, 0],
+            _ => return None,
+        })
     }
 
     fn standard_camera(&mut self, which: &str) -> Option<Camera> {

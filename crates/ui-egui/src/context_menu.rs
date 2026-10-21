@@ -739,21 +739,16 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         "ui.delete" if item.params.is_some() => crate::delete::request(app, p),
         "ui.delete" => delete(app),
         "ui.finishSketch" => app.finish_sketch(),
-        "ui.hide" => {
-            for b in bodies {
-                if !app.session.visibility.hidden_bodies.contains(&b) {
-                    app.session.visibility.hidden_bodies.push(b);
-                }
-            }
-        }
-        "ui.show" => app.session.visibility.hidden_bodies.retain(|b| !bodies.contains(b)),
+        "ui.hide" => show_bodies(app, &bodies, false),
+        "ui.show" => show_bodies(app, &bodies, true),
         "ui.showAll" => {
-            let _ = app.run("browser.visibility", json!({"folder":"bodies", "visible":true}));
-            app.session.visibility.hidden_sketches.clear();
+            let _ = app.run("browser.visibility", json!({"folder": "bodies", "visible": true}));
+            let _ = app.run("browser.visibility", json!({"folder": "sketches", "visible": true}));
         }
         "ui.isolate" => {
-            app.session.visibility.hidden_bodies =
-                app.session.world_state().bodies.iter().map(|b| b.name.clone()).filter(|b| !bodies.contains(b)).collect();
+            let hide: Vec<String> = app.session.world_state().bodies.iter().map(|b| b.name.clone()).filter(|b| !bodies.contains(b)).collect();
+            show_bodies(app, &hide, false);
+            show_bodies(app, &bodies, true);
         }
         "ui.lock" => {
             let locked = bodies.iter().all(|b| app.ui.locked_bodies.contains(b));
@@ -797,7 +792,7 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
                 "inspect.measure"
             };
             let params = if command == "inspect.measure" { json!({ "bodies": bodies }) } else { p.clone() };
-            match app.session.execute(command, &params) {
+            match app.run(command, params) {
                 Ok(v) => {
                     let title = v["name"]
                         .as_str()
@@ -849,7 +844,7 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         }
         "ui.hideSketch" | "ui.showSketch" => {
             if let Some(id) = id_of(&p, "sketch") {
-                crate::browser::set_sketch_visible(app, id, item.id == "ui.showSketch");
+                let _ = app.run("browser.visibility", json!({"items": [id.to_string()], "visible": item.id == "ui.showSketch"}));
             }
         }
         "ui.sketchDims" => {
@@ -933,15 +928,13 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         }
         "ui.originAll" => {
             app.ui.show_origin = true;
-            app.session.visibility.hidden_origin.retain(|h| !["O", "X", "Y", "Z", "XY", "XZ", "YZ"].contains(&h.as_str()));
+            let _ = app.run("browser.visibility", json!({"folder": "origin", "visible": true}));
         }
         "ui.originPart" => {
             let show = p.get("show").and_then(Value::as_bool).unwrap_or(true);
-            for k in strs(&p, "keys") {
-                app.session.visibility.hidden_origin.retain(|h| *h != k);
-                if !show {
-                    app.session.visibility.hidden_origin.push(k);
-                }
+            let keys = strs(&p, "keys");
+            if !keys.is_empty() {
+                let _ = app.run("browser.visibility", json!({"items": keys, "visible": show}));
             }
         }
         "ui.editFeature" => {
@@ -1025,6 +1018,13 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
     }
 }
 
+fn show_bodies(app: &mut SolveApp, bodies: &[String], visible: bool) {
+    if bodies.is_empty() {
+        return;
+    }
+    let _ = app.run("browser.visibility", json!({"items": bodies, "visible": visible}));
+}
+
 /// Delete what is selected: sketch entities, features, and bodies (a Remove feature).
 pub fn delete(app: &mut SolveApp) {
     crate::delete::delete_selection(app);
@@ -1067,14 +1067,13 @@ pub fn toggle_visibility(app: &mut SolveApp) {
         || origin.iter().any(|o| !app.session.visibility.hidden_origin.contains(o))
         || app.session.doc.canvases.iter().any(|c| canvases.contains(&c.id) && c.visible);
     let hide = any_visible;
-    app.session.visibility.hidden_bodies.retain(|b| !bodies.contains(b));
-    app.session.visibility.hidden_origin.retain(|o| !origin.contains(o));
-    if hide {
-        app.session.visibility.hidden_bodies.extend(bodies);
-        app.session.visibility.hidden_origin.extend(origin);
+    show_bodies(app, &bodies, !hide);
+    if !origin.is_empty() {
+        let _ = app.run("browser.visibility", json!({"items": origin, "visible": !hide}));
     }
-    for s in sketches {
-        crate::browser::set_sketch_visible(app, s, !hide);
+    if !sketches.is_empty() {
+        let ids: Vec<String> = sketches.iter().map(|id| id.to_string()).collect();
+        let _ = app.run("browser.visibility", json!({"items": ids, "visible": !hide}));
     }
     for c in canvases {
         let _ = app.run("canvas.edit", json!({ "canvas": c, "visible": !hide }));
