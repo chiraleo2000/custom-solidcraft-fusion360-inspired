@@ -93,21 +93,21 @@ pub use meshbody::{
     mesh_reverse, mesh_section, mesh_separate, mesh_shell, mesh_smooth,
 };
 pub use native::{decode_native_body, encode_native_body};
-pub use offset::with_same_surface;
+pub use offset::{thicken_bodies, with_same_surface};
 pub use ops::{BoolOp, boolean, can_join_touching_faces, split_by_plane, transform, transform_matrix, union_apart};
 pub use polybool::{faceted_boolean, planar_boolean};
 pub use polyhedron::{HalfSpace, convex_polyhedron, draft, offset_faces, shell};
 pub use prism::{extrude_planar_regions, planar_regions_boolean};
 pub use prism_measure::certified_prism_equivalent;
-pub use sew::{EdgeSpec, FaceSpec, SurfSpec, sew};
+pub use sew::{EdgeSpec, FaceSpec, GapEdge, Stitched, SurfSpec, gap_edges, sew, stitch_tolerant};
 pub use splitface::{SplitTool, split_body, split_faces, split_faces_with_map};
 pub use step::step_export;
 pub use step_in::{ImportedBody, StepImport, StepNode, step_import, step_import_shared, step_orientation_errors, step_validate};
 pub use step_out::{ExportBody, ExportProduct, StepHeader, step_export_bodies, step_export_products};
 pub use surface_kind::{FaceSurface, face_surface};
 pub use surfaces::{
-    copy_faces, extend, flip_normals, gap_points, open_sweep, open_sweep_along, patch_edges, patch_guided, patch_region, side_skin, stitch,
-    surface_offset, thicken, trim,
+    copy_faces, extend, flip_normals, gap_points, open_sweep, open_sweep_along, patch_edges, patch_guided, patch_mixed, patch_region, side_skin,
+    stitch, surface_offset, thicken, trim,
 };
 pub use sweep_path::sweep_path;
 pub use topo::{CylinderFace, cylinder_face_at};
