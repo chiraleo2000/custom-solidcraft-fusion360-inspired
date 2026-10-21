@@ -81,13 +81,13 @@ Property tags: each property test references its design property as
       `untrim_drops_the_latest_trim` unit tests in `crates/engine/src/cmd/surface.rs`
     - _Requirements: 3.2, 3.3, 3.4_
 
-- [ ] 3. Add `surface.offset` and `surface.rule` sibling commands
-  - [ ] 3.1 Add `surface_offset` kernel helper + `FeatureKind::SurfaceOffset`
+- [x] 3. Add `surface.offset` and `surface.rule` sibling commands
+  - [x] 3.1 Add `surface_offset` kernel helper + `FeatureKind::SurfaceOffset`
     - Add `pub fn surface_offset(body, distance) -> Result<Body>` in `crates/kernel/src/offset.rs`
       (guarded); add `FeatureKind::SurfaceOffset` variant in `crates/doc/src/document.rs` with all
       new fields `#[serde(default)]`
     - _Requirements: 3.1, 3.6 · design §1A.6, Components table_
-  - [ ] 3.2 Register `surface.offset` and `surface.rule` commands
+  - [x] 3.2 Register `surface.offset` and `surface.rule` commands
     - Register both as new dotted ids in `crates/engine/src/cmd/surface.rs` via `CommandSpec`
       (`.at("SURFACE", "CREATE")`, code-drawn icon in `crates/ui-egui/src/icons.rs`); add
       `FeatureKind::SurfaceRule`; unsupported configs return `bad(cmd, "not supported yet: …")`
@@ -204,7 +204,7 @@ Property tags: each property test references its design property as
       `context_menu(selection, &registry) -> Vec<CommandInfo>` returning only commands whose
       `enabled(session)` holds, plus a synthetic Repeat-last entry; place in `crates/engine`
     - _Requirements: 2.1, 2.2, 2.7 · design §1D (quick-toolbox, context menu)_
-  - [ ] 13.2 View-orientation camera math (Z-up preserved)
+  - [x] 13.2 View-orientation camera math (Z-up preserved)
     - Add a `crates/render` function mapping each of the 26 standard/diagonal directions to a camera
       orientation with world Z up, consistent with existing axis navigation
     - _Requirements: 2.3 · design §1D (view orientation)_
@@ -212,43 +212,74 @@ Property tags: each property test references its design property as
     - Add `SelectMode`, `SelectFilter`, and `pick(ray, candidates, mode, filter) -> Option<Pickable>`
       to `crates/render` (deterministic, occluded resolved by sorted depth, returns only permitted kinds)
     - _Requirements: 2.4, 2.5 · design §1D (selection modes & filters)_
-  - [ ] 13.4 Visual-style render parameter (no geometry change)
+  - [x] 13.4 Visual-style render parameter (no geometry change)
     - Add `VisualStyle { Shaded, ShadedEdges, HiddenEdges, Wireframe }` to `crates/render` driving
       the rasterizer/viewport; it is a view setting — not undoable, not serialized into the design
     - _Requirements: 2.6 · design §1D (visual styles)_
-  - [ ]* 13.5 Property tests for shell math
+  - [x] 13.5 Drag selection modes (window / freeform / paint) pure builders
+    - Add `select_window`, `select_freeform`, `select_paint` to `crates/render`, all pure,
+      deterministic and filter-aware (reusing `SelectFilter` from 13.3): `select_window` returns
+      enclosed vs crossing hits from the drag direction (left-to-right encloses, right-to-left
+      crosses), `select_freeform` resolves hits by point-in-polygon against the lasso path, and
+      `select_paint` accumulates hits along a swept brush path; each returns only permitted kinds
+      and the active `SelectMode` (replace/add/subtract) resolves the result set deterministically
+    - _Requirements: 2.9, 2.10, 2.11 · design §1D (render fns `select_window`/`select_freeform`/`select_paint`)_
+  - [x] 13.6 Depth-stack chooser pure builder
+    - Add `depth_stack(ray, candidates, filter) -> Vec<Pickable>` to `crates/render` returning the
+      overlapping candidates under the cursor ordered by sorted ray depth, keeping only permitted
+      kinds; it never hides or mutates any body — it is a read-only ordering over pick candidates
+    - _Requirements: 2.12 · design §1D (render fn `depth_stack`)_
+  - [ ]* 13.7 Property tests for shell math
     - **Property 17: Visual-style switches never change geometry or timeline** — **Validates: 2.6**
     - **Property 18: View orientation preserves Z-up** — **Validates: 2.3**
     - **Property 19: Selection respects mode and filter, deterministically** — **Validates: 2.4, 2.5**
     - **Property 20: Quick-toolbox and context-menu entries resolve to valid commands** — **Validates: 2.1, 2.2** (each ≥100 inputs)
+  - [ ]* 13.8 Property tests for drag selection and depth chooser
+    - **Feature: fusion360-feature-parity, Property 25: Drag selection is deterministic, respects the
+      filter, and the mode (replace/add/subtract) composes the result set** — **Validates: 2.9, 2.10, 2.11**
+    - **Feature: fusion360-feature-parity, Property 26: The depth chooser lists candidates ordered by
+      ray depth and hides no body** — **Validates: 2.12** (each ≥100 inputs)
 
 - [ ] 14. Register shell commands and wire thin egui widgets
   - [ ] 14.1 Register `ui.*` / `view.*` shell commands
     - In `crates/engine/src/cmd/ui.rs` + `view.rs`, register `ui.quick_toolbox`, `ui.context_menu`,
       `ui.repeat_last`, `ui.select_mode`, `ui.select_filter`, `view.orient`, `view.visual_style`;
-      engine holds current mode/filter/style as session state; invalid/stale targets return an `Err`
-      (never panic), consuming `ux-ui-shell-improvements` widgets where that spec already provides them
-    - _Requirements: 2.1–2.6, 2.7, 2.8 · design §1D_
+      extend `ui.select_mode` to cover the new drag modes (window/freeform/paint) backed by 13.5 and
+      register `ui.select_depth` driven by `depth_stack` (13.6), plus a view-only
+      `view.component_colors` toggle that cycles per-component colours through `view.component_colors`
+      — it is not undoable and not serialized into the design; engine holds current
+      mode/filter/style/depth as session state; invalid/stale targets return an `Err` (never panic),
+      consuming `ux-ui-shell-improvements` widgets where that spec already provides them
+    - _Requirements: 2.1–2.6, 2.7, 2.8, 2.9, 2.10, 2.11, 2.12, 2.13, 2.14, 2.15 · design §1D (`view.component_colors`)_
   - [ ] 14.2 Wire thin egui widgets reading engine state
     - In `crates/ui-egui`, add S-toolbox, context/marking menu, ViewCube, selection filter, and
       visual-style switch that read engine state and act via `app.run(id, params)` / `app.start(id)`;
-      colours from `theme::Tokens`; no behaviour bypasses `CommandSpec`
-    - _Requirements: 2.7 · design §1D (thinness)_
+      add the depth-stack chooser (reading the `depth_stack` ordering) and the component-color toggle
+      (reading `view.component_colors` state), both thin — they present engine state and act through
+      `CommandSpec` only; colours from `theme::Tokens`; no behaviour bypasses `CommandSpec`
+    - _Requirements: 2.7, 2.12, 2.15 · design §1D (thinness, view-only visual style)_
   - [ ]* 14.3 Fuzz invalid shell targets + control-channel screenshot evidence
     - **Property 1** over `ui.*`/`view.*` with vanished/invalid targets — **Validates: 2.8**
-    - Capture `ui.start` + `ui.click` + `ui.screenshot` evidence for toolbox, ViewCube orient, and
-      visual-style switch (before/after)
+    - Capture `ui.start` + `ui.click` + `ui.screenshot` evidence for toolbox, ViewCube orient,
+      drag-selection + depth chooser, component-color cycling, and visual-style switch (before/after)
+  - [ ]* 14.4 Property test for component color cycling
+    - **Feature: fusion360-feature-parity, Property 27: Cycling component colours leaves geometry, the
+      timeline, and appearances unchanged** — **Validates: 2.13, 2.14, 2.15** (≥100 inputs)
 
 - [ ] 15. Stage 1 integration + registry/docs wiring
   - [ ] 15.1 Register all new commands and regenerate feature docs
     - Ensure every new id is wired in `crates/engine/src/cmd/mod.rs`; run `cargo xtask features` to
       regenerate `docs/features.md`; update `ROADMAP.md` for the landed Stage-1 tasks
     - _Requirements: 1.6 · design (Document & format, Roadmap)_
-  - [ ]* 15.2 Standard-workflow validation recipe (mesh RE end-to-end)
+  - [ ]* 15.2 Standard-workflow validation recipes (mesh RE + reference-canvas spline-revolve)
     - Script a control-channel/CLI recipe: import mesh → `mesh.section` → clean sketch →
       surface/solid rebuild → `mesh.deviation`; assert every step runs through a `CommandSpec`, no
       panic, unsupported steps return `"not supported yet: …"`
-    - _Requirements: 13.2, 13.6 · design (standard-workflow validation)_
+    - Script a reference-canvas spline-revolve recipe: insert + calibrate a reference canvas 1:1 →
+      draw a centerline + a fit-point spline → confirm the sketch is fully-defined → `solid.revolve`
+      360° → `solid.shell` → apply a transparent appearance; assert each step runs through a
+      `CommandSpec`, the sketch is fully-defined before the revolve, and no step panics
+    - _Requirements: 13.2, 13.6, 13.7 · design (standard-workflow validation)_
 
 - [ ] 16. Stage 1 alpha checkpoint
   - Ensure `cargo xtask ci` is green (fmt, clippy -D warnings, tests, assets, layers, wasm); confirm
@@ -332,6 +363,53 @@ Property tags: each property test references its design property as
     - Scripted control-channel/CLI recipes running only registered commands end-to-end; timeline edit
       re-evaluates dependents; motion respects limits/contact; interference reported; evidence captured
     - _Requirements: 13.1, 13.3, 13.4, 13.5, 13.6 · design (standard-workflow validation)_
+  - [ ]* 22.2 Mold-design workflow recipe
+    - Scripted control-channel/CLI recipe: build a prototype body → `mold.box` → `combine` Cut with
+      `keep_tools` (Combine Cut Keep Tools) → `mold.split` into two parts with `mold.alignment_pins`
+      and `mold.pour_spout`; assert every step runs through a `CommandSpec`, no step panics, and any
+      unsupported configuration returns `"not supported yet: …"`; capture before/after evidence
+    - _Requirements: 13.8 · design (standard-workflow validation, Stage-3-adjacent — Mold design & DfAM)_
+
+---
+
+### Stage 3-adjacent — Mold design & DfAM (Requirement 14 · design "Stage 3-adjacent — Mold design & DfAM") · later-phase
+
+- [x]* 23. Mold & DfAM command track (additive; builds on existing solid/boolean capabilities)
+  - [x]* 23.1 Extend Combine with Keep Tools
+    - In `crates/doc/src/document.rs`, add `#[serde(default)] keep_tools: bool` to the existing
+      Combine `FeatureKind` variant so `solidcraft-container/1` keeps round-tripping; honor it in the
+      combine command in `crates/engine/src/cmd/` so the tool body is preserved on a cut instead of
+      being consumed; finite/bounded validation on all inputs
+    - _Requirements: 14.2 · design Stage-3-adjacent_
+  - [x]* 23.2 Mold box + cavity
+    - Add a guarded `mold_box(...)` helper in `crates/kernel` (every `truck` call through
+      `solidcraft_kernel::guard`); add `FeatureKind::MoldBox` (`#[serde(default)]` fields) in
+      `crates/doc/src/document.rs`; register `mold.box`; register `mold.cavity` as the thin
+      keep-tools combine wrapper (Combine Cut with `keep_tools = true`); code-drawn icons; cap body
+      counts before any kernel call
+    - _Requirements: 14.1, 14.2 · design Stage-3-adjacent_
+  - [x]* 23.3 Split, alignment pins, pour spout
+    - Register `mold.split` (split into upper/lower, `FeatureKind::MoldSplit`), `mold.alignment_pins`
+      (parametric boss + hole at the parting corners, `FeatureKind::AlignmentPins`, capped pin
+      count), and `mold.pour_spout` (swept/extruded cut, `FeatureKind::PourSpout`); all kernel work
+      guarded; new variants use `#[serde(default)]`; unsupported configs return `"not supported yet: …"`
+    - _Requirements: 14.3, 14.4 · design Stage-3-adjacent_
+  - [x]* 23.4 DfAM clearance + nesting
+    - Register `dfam.clearance` (parametric gap via offset-face / user parameter) and `dfam.nest`
+      (`pack_bodies` — a SolidCraft-own, capped 2D packer in `crates/geom`, `FeatureKind::Nesting`,
+      **no GPL packer**); guard every kernel call; cap packing/body counts before allocating;
+      hostile/finite checks on all parameters
+    - _Requirements: 14.5, 14.6 · design Stage-3-adjacent_
+  - [ ]* 23.5 Property + hostile-param fuzz for the mold/DfAM track
+    - **Feature: fusion360-feature-parity, Property 28 (later-phase): mold cavity volume equals the
+      prototype volume with Keep Tools preserving the tool; a split union equals the pre-split mold;
+      nested bodies are non-overlapping and within bounds** — **Validates: 14.7**
+    - **Feature: fusion360-feature-parity, Property 1: Hostile input never crashes and leaves the
+      design unchanged** over all `mold.*` / `dfam.*` commands — **Validates: 14.8** (each ≥100 inputs)
+  - Note: all new `FeatureKind` variants (`MoldBox`, `MoldSplit`, `AlignmentPins`, `PourSpout`,
+    `Nesting`) and the Combine `keep_tools` field use `#[serde(default)]` so `solidcraft-container/1`
+    round-trips; `mold_box`/`pack_bodies` and every other kernel call route through
+    `solidcraft_kernel::guard`; body, pin, and packing counts are capped before any kernel call.
 
 ---
 
@@ -343,8 +421,18 @@ Property tags: each property test references its design property as
 - Because the never-crash rule outranks feature work, the hostile-param fuzz and oracle sub-tasks
   are strongly recommended before any Stage 1 commit even though they are formally optional.
 - Every task is additive: existing command ids (`surface.*`, `form.*`, `mesh.*`, `drawing.*`,
-  `cam.contour`) and saved `solidcraft-container/1` designs keep working; new fields use
-  `#[serde(default)]`, new capabilities use sibling ids.
+  `cam.contour`, the existing Combine) and saved `solidcraft-container/1` designs keep working; new
+  fields use `#[serde(default)]` (including the Combine `keep_tools` flag and the new `MoldBox`,
+  `MoldSplit`, `AlignmentPins`, `PourSpout`, `Nesting` variants), and new capabilities use sibling
+  ids (`mold.*`, `dfam.*`).
+- The Mold & DfAM track (task 23) is an independently-shippable, **later-phase** addition kept
+  `*`-optional to stay consistent with how this file treats post-Stage-1 work (Stages 2–6); it builds
+  on the existing solid/boolean capabilities and introduces no GPL packer — the 2D nesting packer is
+  SolidCraft-own in `crates/geom`.
+- Two new standard-workflow recipes are seeded alongside the existing validation (`*`-optional like
+  15.2/22): the reference-canvas spline-revolve workflow (15.2) and the mold-design workflow (22.2),
+  each asserting every step runs through a `CommandSpec`, the sketch is fully-defined where required,
+  no step panics, and unsupported steps return `"not supported yet: …"`.
 - All kernel work routes through `solidcraft_kernel::guard`; only `crates/kernel` touches `truck`;
   shell math lives in `crates/render`/`crates/engine` so `crates/ui-egui` stays thin and swappable;
   everything below apps keeps building for wasm (`cargo xtask wasm`).
@@ -360,14 +448,15 @@ Property tags: each property test references its design property as
 ```json
 {
   "waves": [
-    { "id": 0, "tasks": ["1.1", "5.1", "9.2", "13.2", "13.3", "13.4"] },
+    { "id": 0, "tasks": ["1.1", "5.1", "9.2", "13.2", "13.3", "13.4", "13.5", "13.6"] },
     { "id": 1, "tasks": ["1.2", "2.3", "2.4", "3.1", "6.1", "7.1", "9.1", "10.1", "11.1"] },
     { "id": 2, "tasks": ["1.3", "1.4", "2.1", "2.2", "3.2", "5.2", "6.2", "7.2", "10.2", "11.2", "13.1"] },
-    { "id": 3, "tasks": ["2.5", "2.6", "3.3", "6.3", "7.3", "9.3", "10.3", "11.3", "13.5", "14.1"] },
-    { "id": 4, "tasks": ["7.4", "14.2", "15.1"] },
-    { "id": 5, "tasks": ["14.3", "15.2", "17.1", "18.1", "19.1", "20.1", "21.1"] },
-    { "id": 6, "tasks": ["17.2", "17.3", "18.2", "19.2", "20.2", "21.2"] },
-    { "id": 7, "tasks": ["17.4", "18.3", "19.3", "20.3", "21.3", "22.1"] }
+    { "id": 3, "tasks": ["2.5", "2.6", "3.3", "6.3", "7.3", "9.3", "10.3", "11.3", "13.7", "13.8", "14.1"] },
+    { "id": 4, "tasks": ["7.4", "14.2", "14.4", "15.1"] },
+    { "id": 5, "tasks": ["14.3", "15.2", "17.1", "18.1", "19.1", "20.1", "21.1", "23.1"] },
+    { "id": 6, "tasks": ["17.2", "17.3", "18.2", "19.2", "20.2", "21.2", "23.2"] },
+    { "id": 7, "tasks": ["17.4", "18.3", "19.3", "20.3", "21.3", "22.1", "22.2", "23.3", "23.4"] },
+    { "id": 8, "tasks": ["23.5"] }
   ]
 }
 ```
