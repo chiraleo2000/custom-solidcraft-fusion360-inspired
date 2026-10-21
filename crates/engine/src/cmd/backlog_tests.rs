@@ -151,18 +151,18 @@ fn a_cantilever_tip_matches_beam_theory() {
     let inertia = 10.0 * 1000.0 / 12.0;
     let want = 100.0 * 1_000_000.0 / (3.0 * 200_000.0 * inertia);
     assert!(rel(tip, want) < 1e-6, "{tip} vs {want}");
+    let peak = 100.0 * 100.0 * 5.0 / inertia;
+    assert!(rel(solved["stress_max"].as_f64().unwrap(), peak) < 1e-6, "{solved}");
+    assert!(rel(solved["stress_min"].as_f64().unwrap(), -peak) < 1e-6, "{solved}");
+    assert_eq!(solved["method"], "solidcraft-beam-stiffness");
     assert_eq!(s.doc.features.len(), features);
     run(&mut s, "sim.modal", json!({"body": "Beam", "name": "Modes"}));
-    let features = s.doc.features.len();
-    let solved_mode = run(&mut s, "sim.solve", json!({"name": "Modes"}));
-    let mu = 7.85e-6 * 100.0;
-    let hz = 1.875104_f64.powi(2) / (2.0 * std::f64::consts::PI) * (1000.0 * 200_000.0 * inertia / (mu * 100.0_f64.powi(4))).sqrt();
-    assert!(rel(solved_mode["value"].as_f64().unwrap(), hz) < 1e-6, "{solved_mode} vs {hz}");
-    assert_eq!(solved_mode["unit"], "Hz");
+    let mode = s.execute("sim.solve", &json!({"name": "Modes"})).unwrap_err();
+    assert!(mode.to_string().contains("not supported yet"), "{mode}");
+    assert!(s.doc.studies.iter().any(|study| study.name == "Modes" && study.tip.is_none() && study.stress_max.is_none()));
     run(&mut s, "sim.buckling", json!({"body": "Beam", "name": "Buckle"}));
-    let buckled = run(&mut s, "sim.solve", json!({"name": "Buckle"}));
-    let pcr = std::f64::consts::PI.powi(2) * 200_000.0 * inertia / (4.0 * 100.0 * 100.0);
-    assert!(rel(buckled["value"].as_f64().unwrap(), pcr) < 1e-6, "{buckled} vs {pcr}");
+    let buckled = s.execute("sim.solve", &json!({"name": "Buckle"})).unwrap_err();
+    assert!(buckled.to_string().contains("not supported yet"), "{buckled}");
     assert_eq!(s.doc.features.len(), features);
 }
 
@@ -193,8 +193,13 @@ fn a_pocket_reports_removed_stock_and_a_short_is_only_a_report() {
     assert_eq!(list["rows"], 1);
     run(&mut s, "solid.box", json!({"length": 20, "width": 10, "height": 8, "body_name": "Keep"}));
     run(&mut s, "generative.study", json!({"preserve": ["Keep"], "objective": "mass"}));
+    let before = s.doc.features.len();
     let generated = run(&mut s, "generative.solve", json!({}));
     assert!((generated["width"].as_f64().unwrap() - 6.0).abs() < 1e-6, "{generated}");
+    assert_eq!(generated["method"], "solidcraft-section-reduction");
+    assert_eq!(s.doc.features.len(), before);
+    assert!(s.model.state().body("Candidate").is_none());
+    run(&mut s, "generative.promote", json!({}));
     run(&mut s, "solid.fillet", json!({"edges": [[0, 0, 4]], "radius": 1, "body": "Candidate"}));
     assert!(volume(&mut s) > 0.0);
 }

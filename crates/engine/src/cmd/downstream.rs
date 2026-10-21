@@ -2,7 +2,9 @@
 //! a small schematic check, and a generative candidate. Each one is a SolidCraft command.
 
 use serde_json::{Value, json};
-use solidcraft_doc::{CamSetup, CamTool, GenerativeStudy, RenderScene, Schematic, StoryKey, Storyboard, Study};
+use solidcraft_doc::{CamSetup, CamTool, GenerativeStudy, RenderScene, Schematic, StoryKey, Storyboard, Study, StudyConstraint, StudyLoad};
+use solidcraft_geom::fea::{self, BeamEnd, BeamLoad, BeamSection, BeamSupport};
+use solidcraft_geom::generative::{self, Objective};
 
 use super::CommandSpec;
 use crate::params::{bad, str_};
@@ -80,19 +82,24 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("UTILITIES", "MAKE")
         .icon("extrude")
         .params("sheet: [width, height]; profiles: [[w, h], …]. Overlap is an error"),
-    CommandSpec::new("sim.study", "Simulation Study", sim_study).params("name?; kind?: static; body: name"),
-    CommandSpec::new("sim.static", "Static Stress", sim_static)
-        .params("body: an axis-aligned box; force?: newtons along Z at the far X end; modulus?: N/mm^2 (default 200000). Returns the tip deflection"),
-    CommandSpec::new("sim.solve", "Solve Study", sim_solve).params("name?: study. A box solves; other shapes are refused"),
-    CommandSpec::new("sim.modal", "Modal Study", sim_modal).params("body: name. The first cantilever frequency, in hertz"),
-    CommandSpec::new("sim.thermal", "Thermal Study", sim_thermal).params("body: name"),
-    CommandSpec::new("sim.thermal_stress", "Thermal Stress", sim_thermal_stress).params("body: name"),
-    CommandSpec::new("sim.buckling", "Buckling Study", sim_buckling).params("body: name"),
-    CommandSpec::new("sim.nonlinear", "Nonlinear Study", sim_nonlinear).params("body: name"),
-    CommandSpec::new("sim.event", "Event Study", sim_event).params("body: name"),
-    CommandSpec::new("sim.shape", "Shape Study", sim_shape).params("body: name"),
-    CommandSpec::new("sim.injection", "Injection Study", sim_injection).params("body: name"),
-    CommandSpec::new("sim.cooling", "Cooling Study", sim_cooling).params("body: name"),
+    CommandSpec::new("sim.study", "Simulation Study", sim_study).params(
+        "name?; kind?: static; body: name; material?; modulus?: N/mm^2; force?: N; constraints?: [{kind: fixed|pin, target: min_x|max_x}]; loads?: [{kind: force, magnitude, direction?: [x,y,z], target?}]. Changing inputs marks results stale",
+    ),
+    CommandSpec::new("sim.static", "Static Stress", sim_static).params(
+        "body: an axis-aligned box; force?: N along +Z at max X (default 100); modulus?: N/mm^2 (default 200000, or the material); material?; constraints?: default clamp at min X. Solves with solidcraft-beam-stiffness and reports min/max. The solid is unchanged",
+    ),
+    CommandSpec::new("sim.solve", "Solve Study", sim_solve).params(
+        "name?: study; elements?: 1..32. A static axis-aligned box only. Other kinds, a free body, or a study over the size cap are refused. The solid is unchanged",
+    ),
+    CommandSpec::new("sim.modal", "Modal Study", sim_modal).params("body: name. Solving a modal study is not supported yet"),
+    CommandSpec::new("sim.thermal", "Thermal Study", sim_thermal).params("body: name. Solving a thermal study is not supported yet"),
+    CommandSpec::new("sim.thermal_stress", "Thermal Stress", sim_thermal_stress).params("body: name. Solving a thermal-stress study is not supported yet"),
+    CommandSpec::new("sim.buckling", "Buckling Study", sim_buckling).params("body: name. Solving a buckling study is not supported yet"),
+    CommandSpec::new("sim.nonlinear", "Nonlinear Study", sim_nonlinear).params("body: name. Solving a nonlinear study is not supported yet"),
+    CommandSpec::new("sim.event", "Event Study", sim_event).params("body: name. Solving an event study is not supported yet"),
+    CommandSpec::new("sim.shape", "Shape Study", sim_shape).params("body: name. Solving a shape study is not supported yet"),
+    CommandSpec::new("sim.injection", "Injection Study", sim_injection).params("body: name. Solving an injection study is not supported yet"),
+    CommandSpec::new("sim.cooling", "Cooling Study", sim_cooling).params("body: name. Solving a cooling study is not supported yet"),
     CommandSpec::new("render.environment", "Render Environment", render_environment)
         .noundo()
         .params("color?: [r,g,b] 0…1; intensity?: number. A missing colour uses white"),
@@ -113,11 +120,14 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("ecad.push_3d", "Push Board to 3D", ecad_push).params("makes a PCB body from the board outline"),
     CommandSpec::new("ecad.export", "Export Gerber", ecad_export).noundo().params("path: text file in a public Gerber subset"),
     CommandSpec::new("drawing.export_dxf", "Export Drawing DXF", drawing_dxf).noundo().params("path: ASCII DXF of the sheet's projected model edges"),
-    CommandSpec::new("generative.study", "Generative Study", gen_study)
-        .params("name?; preserve: [body names]; obstacle?: [names]; objective?: stiffness|mass"),
-    CommandSpec::new("generative.solve", "Generate", gen_solve)
-        .params("name?: study. A candidate box on the preserve bounds; mass uses 60% of the width"),
-    CommandSpec::new("generative.promote", "Promote Candidate", gen_promote).params("name?: study. The candidate is already a solid body"),
+    CommandSpec::new("generative.study", "Generative Study", gen_study).params(
+        "name?; preserve: [body names]; obstacle?: [names]; loads?: [{kind, magnitude, direction, target}]; constraints?: [{kind, target}]; objective?: stiffness|mass. Changing inputs marks the study stale",
+    ),
+    CommandSpec::new("generative.solve", "Generate", gen_solve).params(
+        "name?: study. Records a candidate box with method solidcraft-section-reduction. Mass keeps 60% of the width. The solid is unchanged",
+    ),
+    CommandSpec::new("generative.promote", "Promote Candidate", gen_promote)
+        .params("name?: study. Inserts the candidate as an editable box body"),
     CommandSpec::new("drawing.parts_list", "Parts List", parts_list).noundo().params("rows are components, not loose bodies"),
     CommandSpec::new("drawing.detail", "Detail View", drawing_detail)
         .at("DRAWING", "CREATE")
@@ -698,32 +708,230 @@ fn cam_simulate(s: &mut Session, _p: &Value) -> Result<Value> {
     Ok(json!({"removed": removed, "remaining": (stock - removed).max(0.0), "stock": stock, "method": "toolpath"}))
 }
 
-fn push_study(s: &mut Session, p: &Value, kind: &str) -> Result<Value> {
-    let cmd = "sim.study";
-    let body = str_(p, "body").filter(|b| !b.is_empty()).ok_or_else(|| bad(cmd, "`body` is required"))?.to_string();
-    if s.model.state().body(&body).is_none() {
-        return Err(bad(cmd, format!("no body `{body}`")));
+const MAX_STUDIES: usize = 100;
+
+fn study_label(cmd: &str, p: &Value, fallback: &str) -> Result<String> {
+    let name = str_(p, "name").unwrap_or(fallback);
+    if name.is_empty() || name.len() > 200 || name.chars().any(char::is_control) {
+        return Err(bad(cmd, "the study name is not usable"));
     }
-    let name = str_(p, "name").unwrap_or(kind).to_string();
-    s.doc_mut().studies.push(Study {
-        name: name.clone(),
-        kind: kind.into(),
+    Ok(name.to_string())
+}
+
+fn explicit_kind(cmd: &str, p: &Value) -> Result<Option<String>> {
+    match str_(p, "kind") {
+        None => Ok(None),
+        Some(kind) => {
+            if kind.is_empty() || kind.len() > 40 || !kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(bad(cmd, "the study kind is not usable"));
+            }
+            Ok(Some(kind.to_string()))
+        }
+    }
+}
+
+fn named_body(cmd: &str, p: &Value, key: &str) -> Result<Option<String>> {
+    match p.get(key) {
+        None => Ok(None),
+        Some(Value::String(name)) => {
+            if name.is_empty() || name.len() > 200 {
+                return Err(bad(cmd, "a body name is not usable"));
+            }
+            Ok(Some(name.clone()))
+        }
+        Some(_) => Err(bad(cmd, format!("`{key}` must be a name"))),
+    }
+}
+
+fn require_body(s: &Session, cmd: &str, name: &str) -> Result<()> {
+    if s.model.state().body(name).is_none() { Err(bad(cmd, format!("no body `{name}`"))) } else { Ok(()) }
+}
+
+fn material_of(cmd: &str, p: &Value) -> Result<Option<String>> {
+    match p.get("material") {
+        None => Ok(None),
+        Some(Value::String(name)) => {
+            let name = name.trim();
+            if name.is_empty() || name.len() > 200 {
+                return Err(bad(cmd, "the material name is not usable"));
+            }
+            if fea::youngs_modulus(name).is_none() {
+                return Err(bad(cmd, format!("unknown material `{name}`")));
+            }
+            Ok(Some(name.to_string()))
+        }
+        Some(_) => Err(bad(cmd, "`material` must be a name")),
+    }
+}
+
+fn modulus_of(cmd: &str, p: &Value, material: &str) -> Result<f64> {
+    if let Some(value) = p.get("modulus") {
+        let n = value.as_f64().ok_or_else(|| bad(cmd, "`modulus` must be a number"))?;
+        let n = finite(cmd, n, "modulus")?;
+        if n <= 0.0 {
+            return Err(bad(cmd, "modulus must be positive"));
+        }
+        return Ok(n);
+    }
+    if material.is_empty() {
+        return Ok(200_000.0);
+    }
+    fea::youngs_modulus(material).ok_or_else(|| bad(cmd, format!("unknown material `{material}`")))
+}
+
+fn force_of(cmd: &str, p: &Value) -> Result<Option<f64>> {
+    match p.get("force") {
+        None => Ok(None),
+        Some(value) => {
+            let n = value.as_f64().ok_or_else(|| bad(cmd, "`force` must be a number"))?;
+            Ok(Some(finite(cmd, n, "force")?))
+        }
+    }
+}
+
+fn element_count(cmd: &str, p: &Value) -> Result<usize> {
+    let Some(value) = p.get("elements") else { return Ok(4) };
+    let n = if let Some(n) = value.as_u64() {
+        n
+    } else if let Some(n) = value.as_f64() {
+        if !n.is_finite() || n < 1.0 || n.fract() != 0.0 {
+            return Err(bad(cmd, "`elements` must be a positive integer"));
+        }
+        n as u64
+    } else {
+        return Err(bad(cmd, "`elements` must be a positive integer"));
+    };
+    if n == 0 {
+        return Err(bad(cmd, "`elements` must be a positive integer"));
+    }
+    if n > fea::MAX_ELEMENTS as u64 {
+        return Err(bad(cmd, "the study exceeds the size cap"));
+    }
+    Ok(n as usize)
+}
+
+fn constraints_of(cmd: &str, p: &Value) -> Result<Option<Vec<StudyConstraint>>> {
+    let Some(value) = p.get("constraints") else { return Ok(None) };
+    let Some(items) = value.as_array() else { return Err(bad(cmd, "`constraints` must be a list")) };
+    if items.len() > 32 {
+        return Err(bad(cmd, "the study exceeds the size cap"));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if !item.is_object() {
+            return Err(bad(cmd, "`constraints` must be a list of objects"));
+        }
+        let kind = item.get("kind").and_then(Value::as_str).unwrap_or("fixed");
+        let target = item.get("target").and_then(Value::as_str).unwrap_or("min_x");
+        if !matches!(kind, "fixed" | "pin") {
+            return Err(bad(cmd, format!("not supported yet: a {kind} constraint")));
+        }
+        if !matches!(target, "min_x" | "max_x") {
+            return Err(bad(cmd, format!("not supported yet: a constraint on `{target}`")));
+        }
+        out.push(StudyConstraint { kind: kind.to_string(), target: target.to_string() });
+    }
+    Ok(Some(out))
+}
+
+fn loads_of_params(cmd: &str, p: &Value) -> Result<Option<Vec<StudyLoad>>> {
+    let Some(value) = p.get("loads") else { return Ok(None) };
+    let Some(items) = value.as_array() else { return Err(bad(cmd, "`loads` must be a list")) };
+    if items.len() > 32 {
+        return Err(bad(cmd, "the study exceeds the size cap"));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if !item.is_object() {
+            return Err(bad(cmd, "`loads` must be a list of objects"));
+        }
+        let kind = item.get("kind").and_then(Value::as_str).unwrap_or("force");
+        if kind != "force" {
+            return Err(bad(cmd, format!("not supported yet: a {kind} load")));
+        }
+        let magnitude = item.get("magnitude").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`magnitude` is required"))?;
+        let magnitude = finite(cmd, magnitude, "magnitude")?;
+        let direction = match item.get("direction") {
+            None => [0.0, 0.0, 1.0],
+            Some(value) => {
+                let point = crate::params::vec3(value).ok_or_else(|| bad(cmd, "`direction` must be [x, y, z]"))?;
+                [point.x, point.y, point.z]
+            }
+        };
+        let len = (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]).sqrt();
+        if !(len.is_finite() && len > 1e-9) {
+            return Err(bad(cmd, "the load direction is not usable"));
+        }
+        let target = item.get("target").and_then(Value::as_str).unwrap_or("max_x");
+        if !matches!(target, "min_x" | "max_x") {
+            return Err(bad(cmd, format!("not supported yet: a load on `{target}`")));
+        }
+        out.push(StudyLoad { kind: kind.to_string(), magnitude, direction, target: target.to_string() });
+    }
+    Ok(Some(out))
+}
+
+fn default_load(force: f64) -> StudyLoad {
+    StudyLoad { kind: "force".into(), magnitude: force, direction: [0.0, 0.0, 1.0], target: "max_x".into() }
+}
+
+fn default_clamp() -> StudyConstraint {
+    StudyConstraint { kind: "fixed".into(), target: "min_x".into() }
+}
+
+fn direction_len(direction: [f64; 3]) -> f64 {
+    (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]).sqrt()
+}
+
+fn signed_force(loads: &[StudyLoad], fallback: f64) -> f64 {
+    if loads.is_empty() {
+        return fallback;
+    }
+    let mut sum = 0.0;
+    for load in loads {
+        let len = direction_len(load.direction);
+        if len > 1e-12 && load.direction[2].abs() / len > 0.999 {
+            let sign = if load.direction[2] < 0.0 { -1.0 } else { 1.0 };
+            sum += load.magnitude * sign;
+        }
+    }
+    if sum.is_finite() { sum } else { fallback }
+}
+
+fn blank_study(
+    name: String,
+    kind: String,
+    body: String,
+    force: f64,
+    modulus: f64,
+    material: String,
+    constraints: Vec<StudyConstraint>,
+    loads: Vec<StudyLoad>,
+) -> Study {
+    Study {
+        name,
+        kind,
         body,
-        force: 0.0,
-        modulus: 200_000.0,
+        force,
+        modulus,
         tip: None,
         method: String::new(),
         stale: true,
-    });
-    Ok(json!({"study": name, "kind": kind}))
+        material,
+        constraints,
+        loads,
+        displacement_min: None,
+        displacement_max: None,
+        stress_min: None,
+        stress_max: None,
+    }
 }
 
-fn sim_study(s: &mut Session, p: &Value) -> Result<Value> {
-    let kind = str_(p, "kind").unwrap_or("static");
-    push_study(s, p, kind)
+fn feature_ids(s: &Session) -> Vec<u64> {
+    s.doc.features.iter().map(|feature| feature.id).collect()
 }
 
-fn box_size(s: &Session, cmd: &str, body: &str) -> Result<(f64, f64, f64)> {
+fn box_section(s: &Session, cmd: &str, body: &str) -> Result<(f64, f64, f64)> {
     let state = s.model.state();
     let solid = state.body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
     let measured = solidcraft_kernel::measure(&solid.body).map_err(|e| bad(cmd, e.to_string()))?;
@@ -733,126 +941,316 @@ fn box_size(s: &Session, cmd: &str, body: &str) -> Result<(f64, f64, f64)> {
     let length = measured.bbox.max.x - measured.bbox.min.x;
     let width = measured.bbox.max.y - measured.bbox.min.y;
     let height = measured.bbox.max.z - measured.bbox.min.z;
-    if !(length > 1e-6 && width > 1e-6 && height > 1e-6) {
+    if !(length.is_finite() && width.is_finite() && height.is_finite() && length > 1e-6 && width > 1e-6 && height > 1e-6) {
         return Err(bad(cmd, "the beam and the load must be finite"));
+    }
+    if length > fea::MAX_DIMENSION || width > fea::MAX_DIMENSION || height > fea::MAX_DIMENSION {
+        return Err(bad(cmd, "the study exceeds the size cap"));
+    }
+    let box_volume = length * width * height;
+    let gap = (measured.volume - box_volume).abs();
+    if !(measured.volume.is_finite() && gap <= (1e-4 * box_volume).max(1e-3)) {
+        return Err(bad(cmd, "not supported yet: static stress of a body that is not an axis-aligned box"));
     }
     Ok((length, width, height))
 }
 
-/// Steel, used so a box has a mass and a thermal capacity. kg/mm³.
-const STEEL_DENSITY: f64 = 7.85e-6;
-
-fn study_value(kind: &str, length: f64, width: f64, height: f64, force: f64, modulus: f64) -> Result<(f64, &'static str, &'static str)> {
-    let inertia = width * height * height * height / 12.0;
-    let area = width * height;
-    let tip = force * length * length * length / (3.0 * modulus * inertia);
-    let value = match kind {
-        "static" | "shape" => tip,
-        "modal" => {
-            let mu = STEEL_DENSITY * area;
-            let lambda = 1.875104_f64.powi(2) / (2.0 * std::f64::consts::PI);
-            lambda * (1000.0 * modulus * inertia / (mu * length.powi(4))).sqrt()
-        }
-        "thermal" | "thermal_stress" => {
-            let delta = length / (0.045 * area);
-            if kind == "thermal" { delta } else { modulus * 12.0e-6 * delta }
-        }
-        "buckling" => std::f64::consts::PI.powi(2) * modulus * inertia / (4.0 * length * length),
-        "nonlinear" => tip / (1.0 + (tip / length).powi(2)).sqrt(),
-        "event" => {
-            let k = 3.0 * modulus * inertia / length.powi(3);
-            let mass = STEEL_DENSITY * length * area;
-            let omega = (k * 1000.0 / mass).sqrt();
-            let speed = force * 1.0e-3 / mass;
-            speed / omega * 1000.0
-        }
-        "injection" => {
-            let d = width.min(height) / 1000.0;
-            let pressure = 32.0 * 1.0e-3 * 0.05 * (length / 1000.0) / (d * d);
-            pressure * 1.0e-6
-        }
-        "cooling" => {
-            let volume = length * width * height * 1.0e-9;
-            let skin = 2.0 * (length * width + length * height + width * height) * 1.0e-6;
-            7850.0 * 500.0 * volume / (20.0 * skin)
-        }
-        _ => return Err(bad("sim.solve", format!("not supported yet: solving a {kind} study"))),
-    };
-    if !value.is_finite() || value < 0.0 {
-        return Err(bad("sim.solve", "the study did not produce a finite result"));
+fn beam_supports(cmd: &str, constraints: &[StudyConstraint]) -> Result<Vec<BeamSupport>> {
+    if constraints.is_empty() {
+        return Err(bad(cmd, "under-constrained: the beam can move as a rigid body"));
     }
-    let (unit, method) = match kind {
-        "static" => ("mm", "euler-bernoulli"),
-        "modal" => ("Hz", "euler-bernoulli-modal"),
-        "thermal" => ("K", "conduction"),
-        "thermal_stress" => ("N/mm^2", "thermal-stress"),
-        "buckling" => ("N", "euler-cantilever"),
-        "nonlinear" => ("mm", "geometric-stiffening"),
-        "event" => ("mm", "impulse"),
-        "shape" => ("mm", "tip-stiffness"),
-        "injection" => ("N/mm^2", "poiseuille"),
-        "cooling" => ("s", "lumped-cooling"),
-        _ => ("", ""),
-    };
-    Ok((value, unit, method))
+    let mut supports = Vec::with_capacity(constraints.len());
+    for constraint in constraints {
+        let end = match constraint.target.as_str() {
+            "min_x" => BeamEnd::MinX,
+            "max_x" => BeamEnd::MaxX,
+            other => return Err(bad(cmd, format!("not supported yet: a constraint on `{other}`"))),
+        };
+        let clamp = match constraint.kind.as_str() {
+            "fixed" => true,
+            "pin" => false,
+            other => return Err(bad(cmd, format!("not supported yet: a {other} constraint"))),
+        };
+        supports.push(BeamSupport { end, clamp });
+    }
+    Ok(supports)
 }
 
-fn solve_static(s: &mut Session, body: &str, force: f64, modulus: f64) -> Result<f64> {
-    let cmd = "sim.static";
-    if !(force.is_finite() && modulus > 0.0) {
-        return Err(bad(cmd, "the beam and the load must be finite"));
+fn beam_loads(cmd: &str, loads: &[StudyLoad], legacy_force: f64) -> Result<Vec<BeamLoad>> {
+    let source = if loads.is_empty() && legacy_force != 0.0 { vec![default_load(legacy_force)] } else { loads.to_vec() };
+    let mut out = Vec::with_capacity(source.len());
+    for load in &source {
+        if load.kind != "force" {
+            return Err(bad(cmd, format!("not supported yet: a {} load", load.kind)));
+        }
+        let end = match load.target.as_str() {
+            "min_x" => BeamEnd::MinX,
+            "max_x" => BeamEnd::MaxX,
+            other => return Err(bad(cmd, format!("not supported yet: a load on `{other}`"))),
+        };
+        let len = direction_len(load.direction);
+        if !(len.is_finite() && len > 1e-9) {
+            return Err(bad(cmd, "the load direction is not usable"));
+        }
+        if load.direction[0].abs() > 1e-3 * len || load.direction[1].abs() > 1e-3 * len {
+            return Err(bad(cmd, "not supported yet: a load that is not along Z"));
+        }
+        let sign = if load.direction[2] < 0.0 { -1.0 } else { 1.0 };
+        out.push(BeamLoad { end, force_z: load.magnitude * sign });
     }
-    let (length, width, height) = box_size(s, cmd, body)?;
-    let (value, _, _) = study_value("static", length, width, height, force, modulus)?;
-    Ok(value)
+    Ok(out)
+}
+
+fn run_beam(
+    cmd: &str,
+    size: (f64, f64, f64),
+    modulus: f64,
+    elements: usize,
+    constraints: &[StudyConstraint],
+    loads: &[StudyLoad],
+    legacy_force: f64,
+) -> Result<fea::BeamField> {
+    let supports = beam_supports(cmd, constraints)?;
+    let applied = beam_loads(cmd, loads, legacy_force)?;
+    let section = BeamSection { length: size.0, width: size.1, height: size.2, modulus, elements };
+    fea::solve_beam(section, &supports, &applied).map_err(|err| bad(cmd, err))
+}
+
+fn apply_field(study: &mut Study, field: &fea::BeamField) {
+    study.tip = Some(field.tip);
+    study.method = field.method.to_string();
+    study.stale = false;
+    study.displacement_min = Some(field.displacement_min);
+    study.displacement_max = Some(field.displacement_max);
+    study.stress_min = Some(field.stress_min);
+    study.stress_max = Some(field.stress_max);
+}
+
+fn static_json(name: &str, field: &fea::BeamField) -> Value {
+    let peak = field.stress_max.abs().max(field.stress_min.abs());
+    let colours: Vec<[u8; 3]> = field
+        .stress
+        .iter()
+        .map(|sample| {
+            let colour = solidcraft_render::result_colour_value(*sample, 0.0, peak);
+            [colour.0, colour.1, colour.2]
+        })
+        .collect();
+    json!({
+        "study": name,
+        "tip_mm": field.tip,
+        "value": field.tip,
+        "unit": "mm",
+        "displacement_min": field.displacement_min,
+        "displacement_max": field.displacement_max,
+        "stress_min": field.stress_min,
+        "stress_max": field.stress_max,
+        "stress_unit": "N/mm^2",
+        "method": field.method,
+        "colours": colours,
+    })
+}
+
+fn store_study(s: &mut Session, p: &Value, explicit: Option<&str>, create_kind: &str) -> Result<Value> {
+    let cmd = "sim.study";
+    let name = study_label(cmd, p, explicit.unwrap_or(create_kind))?;
+    let body = named_body(cmd, p, "body")?;
+    if let Some(body) = &body {
+        require_body(s, cmd, body)?;
+    }
+    let material = material_of(cmd, p)?;
+    let modulus = if p.get("modulus").is_some() { Some(modulus_of(cmd, p, material.as_deref().unwrap_or(""))?) } else { None };
+    let force = force_of(cmd, p)?;
+    let constraints = constraints_of(cmd, p)?;
+    let loads = loads_of_params(cmd, p)?;
+    let index = s.doc.studies.iter().rposition(|study| study.name == name);
+    let Some(index) = index else {
+        let body = body.ok_or_else(|| bad(cmd, "`body` is required"))?;
+        if s.doc.studies.len() >= MAX_STUDIES {
+            return Err(bad(cmd, "the study exceeds the size cap"));
+        }
+        let material = material.unwrap_or_default();
+        let modulus = match modulus {
+            Some(value) => value,
+            None => modulus_of(cmd, p, &material)?,
+        };
+        let force = force.unwrap_or(0.0);
+        let constraints = constraints.unwrap_or_default();
+        let mut loads = loads.unwrap_or_default();
+        if loads.is_empty() && force != 0.0 {
+            loads.push(default_load(force));
+        }
+        let kind = explicit.unwrap_or(create_kind).to_string();
+        let stored_force = signed_force(&loads, force);
+        s.doc_mut().studies.push(blank_study(name.clone(), kind.clone(), body, stored_force, modulus, material, constraints, loads));
+        return Ok(json!({"study": name, "kind": kind, "stale": true}));
+    };
+    let Some(study) = s.doc_mut().studies.get_mut(index) else {
+        return Err(bad(cmd, "no study"));
+    };
+    let mut changed = false;
+    if let Some(kind) = explicit
+        && study.kind != kind
+    {
+        study.kind = kind.to_string();
+        changed = true;
+    }
+    if let Some(body) = body
+        && study.body != body
+    {
+        study.body = body;
+        changed = true;
+    }
+    if let Some(material) = material
+        && study.material != material
+    {
+        let next = fea::youngs_modulus(&material);
+        study.material = material;
+        changed = true;
+        if modulus.is_none()
+            && let Some(next) = next
+            && study.modulus != next
+        {
+            study.modulus = next;
+        }
+    }
+    if let Some(modulus) = modulus
+        && study.modulus != modulus
+    {
+        study.modulus = modulus;
+        changed = true;
+    }
+    if let Some(force) = force {
+        if study.force != force {
+            study.force = force;
+            changed = true;
+        }
+        if loads.is_none() {
+            let target = study.loads.first().map(|load| load.target.clone()).unwrap_or_else(|| "max_x".into());
+            let next = vec![StudyLoad { kind: "force".into(), magnitude: force, direction: [0.0, 0.0, 1.0], target }];
+            if study.loads != next {
+                study.loads = next;
+                changed = true;
+            }
+        }
+    }
+    if let Some(constraints) = constraints
+        && study.constraints != constraints
+    {
+        study.constraints = constraints;
+        changed = true;
+    }
+    if let Some(loads) = loads
+        && study.loads != loads
+    {
+        study.loads = loads;
+        study.force = signed_force(&study.loads, study.force);
+        changed = true;
+    }
+    if changed {
+        study.stale = true;
+    }
+    let kind = study.kind.clone();
+    let stale = study.stale;
+    Ok(json!({"study": name, "kind": kind, "stale": stale}))
+}
+
+fn push_study(s: &mut Session, p: &Value, kind: &str) -> Result<Value> {
+    store_study(s, p, Some(kind), kind)
+}
+
+fn sim_study(s: &mut Session, p: &Value) -> Result<Value> {
+    let explicit = explicit_kind("sim.study", p)?;
+    store_study(s, p, explicit.as_deref(), "static")
+}
+
+fn put_static(
+    s: &mut Session,
+    name: &str,
+    body: String,
+    material: String,
+    modulus: f64,
+    force: f64,
+    constraints: Vec<StudyConstraint>,
+    loads: Vec<StudyLoad>,
+    field: &fea::BeamField,
+) -> Result<()> {
+    let cmd = "sim.static";
+    let stored_force = signed_force(&loads, force);
+    if let Some(index) = s.doc.studies.iter().rposition(|study| study.name == name) {
+        let Some(study) = s.doc_mut().studies.get_mut(index) else {
+            return Err(bad(cmd, "no study"));
+        };
+        study.kind = "static".into();
+        study.body = body;
+        study.material = material;
+        study.modulus = modulus;
+        study.force = stored_force;
+        study.constraints = constraints;
+        study.loads = loads;
+        apply_field(study, field);
+        return Ok(());
+    }
+    if s.doc.studies.len() >= MAX_STUDIES {
+        return Err(bad(cmd, "the study exceeds the size cap"));
+    }
+    let mut study = blank_study(name.to_string(), "static".into(), body, stored_force, modulus, material, constraints, loads);
+    apply_field(&mut study, field);
+    s.doc_mut().studies.push(study);
+    Ok(())
 }
 
 fn sim_static(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sim.static";
-    let body = str_(p, "body").filter(|b| !b.is_empty()).ok_or_else(|| bad(cmd, "`body` is required"))?.to_string();
-    let force = p.get("force").and_then(Value::as_f64).unwrap_or(100.0);
-    let modulus = p.get("modulus").and_then(Value::as_f64).unwrap_or(200_000.0);
-    let tip = solve_static(s, &body, force, modulus)?;
-    let name = str_(p, "name").unwrap_or("static").to_string();
-    s.doc_mut().studies.push(Study {
-        name: name.clone(),
-        kind: "static".into(),
-        body,
-        force,
-        modulus,
-        tip: Some(tip),
-        method: "euler-bernoulli".into(),
-        stale: false,
-    });
-    Ok(json!({"study": name, "tip_mm": tip, "method": "euler-bernoulli"}))
+    let name = study_label(cmd, p, "static")?;
+    let body = named_body(cmd, p, "body")?.ok_or_else(|| bad(cmd, "`body` is required"))?;
+    require_body(s, cmd, &body)?;
+    let material = material_of(cmd, p)?.unwrap_or_default();
+    let modulus = modulus_of(cmd, p, &material)?;
+    let force = force_of(cmd, p)?.unwrap_or(100.0);
+    let constraints = constraints_of(cmd, p)?.unwrap_or_else(|| vec![default_clamp()]);
+    let loads = loads_of_params(cmd, p)?.unwrap_or_else(|| vec![default_load(force)]);
+    let elements = element_count(cmd, p)?;
+    let features = feature_ids(s);
+    let size = box_section(s, cmd, &body)?;
+    let field = run_beam(cmd, size, modulus, elements, &constraints, &loads, force)?;
+    if feature_ids(s) != features {
+        return Err(bad(cmd, "the study changed the solid"));
+    }
+    put_static(s, &name, body, material, modulus, force, constraints, loads, &field)?;
+    if feature_ids(s) != features {
+        return Err(bad(cmd, "the study changed the solid"));
+    }
+    Ok(static_json(&name, &field))
 }
 
 fn sim_solve(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sim.solve";
-    let name = str_(p, "name");
-    let (kind, body, force, modulus) = {
-        let study = s.doc.studies.iter().rev().find(|study| name.is_none_or(|n| study.name == n)).ok_or_else(|| bad(cmd, "no study"))?;
-        (study.kind.clone(), study.body.clone(), if study.force == 0.0 { 100.0 } else { study.force }, study.modulus)
+    let wanted = str_(p, "name");
+    let (label, kind, body, force, modulus, constraints, loads) = {
+        let study = s.doc.studies.iter().rev().find(|study| wanted.is_none_or(|n| study.name == n)).ok_or_else(|| bad(cmd, "no study"))?;
+        (study.name.clone(), study.kind.clone(), study.body.clone(), study.force, study.modulus, study.constraints.clone(), study.loads.clone())
     };
-    if !(force.is_finite() && modulus > 0.0) {
+    if kind != "static" {
+        return Err(bad(cmd, format!("not supported yet: solving a {kind} study")));
+    }
+    if !(force.is_finite() && modulus.is_finite() && modulus > 0.0) {
         return Err(bad(cmd, "the beam and the load must be finite"));
     }
-    let before = s.doc.features.len();
-    let (length, width, height) = box_size(s, cmd, &body)?;
-    let (value, unit, method) = study_value(&kind, length, width, height, force, modulus)?;
-    if let Some(study) = s.doc_mut().studies.iter_mut().rev().find(|study| name.is_none_or(|n| study.name == n)) {
-        study.tip = Some(value);
-        study.method = method.into();
-        study.stale = false;
-    }
-    if s.doc.features.len() != before {
+    let elements = element_count(cmd, p)?;
+    let features = feature_ids(s);
+    let size = box_section(s, cmd, &body)?;
+    let field = run_beam(cmd, size, modulus, elements, &constraints, &loads, force)?;
+    if feature_ids(s) != features {
         return Err(bad(cmd, "the study changed the solid"));
     }
-    if kind == "static" {
-        Ok(json!({"tip_mm": value, "value": value, "unit": unit, "method": method}))
-    } else {
-        Ok(json!({"value": value, "unit": unit, "method": method}))
+    if let Some(study) = s.doc_mut().studies.iter_mut().rev().find(|study| study.name == label) {
+        apply_field(study, &field);
     }
+    if feature_ids(s) != features {
+        return Err(bad(cmd, "the study changed the solid"));
+    }
+    Ok(static_json(&label, &field))
 }
 
 fn sim_modal(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1205,91 +1603,274 @@ fn drawing_dxf(s: &mut Session, p: &Value) -> Result<Value> {
     super::drawing::export_dxf(s, p)
 }
 
-fn gen_study(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "generative.study";
-    let preserve = crate::params::string_list(p, "preserve");
-    if preserve.is_empty() {
-        return Err(bad(cmd, "a generative study needs a preserve body"));
+fn name_list(cmd: &str, p: &Value, key: &str) -> Result<Option<Vec<String>>> {
+    let Some(value) = p.get(key) else { return Ok(None) };
+    match value {
+        Value::String(one) => {
+            if one.is_empty() || one.len() > 200 {
+                return Err(bad(cmd, "a body name is not usable"));
+            }
+            Ok(Some(vec![one.clone()]))
+        }
+        Value::Array(items) => {
+            if items.len() > generative::MAX_REGIONS {
+                return Err(bad(cmd, "the study exceeds the size cap"));
+            }
+            let mut names = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(name) = item.as_str() else {
+                    return Err(bad(cmd, format!("`{key}` must be a list of names")));
+                };
+                if name.is_empty() || name.len() > 200 {
+                    return Err(bad(cmd, "a body name is not usable"));
+                }
+                names.push(name.to_string());
+            }
+            Ok(Some(names))
+        }
+        _ => Err(bad(cmd, format!("`{key}` must be a list of names"))),
     }
-    let objective = str_(p, "objective").unwrap_or("stiffness").to_string();
-    if !matches!(objective.as_str(), "stiffness" | "mass") {
-        return Err(bad(cmd, "objective must be stiffness or mass"));
+}
+
+fn require_names(s: &Session, cmd: &str, names: &[String]) -> Result<()> {
+    for name in names {
+        require_body(s, cmd, name)?;
     }
-    let name = str_(p, "name").unwrap_or("Study").to_string();
-    s.doc_mut().generative.push(GenerativeStudy {
-        name: name.clone(),
+    Ok(())
+}
+
+fn body_region(s: &Session, cmd: &str, body: &str) -> Result<generative::BoxRegion> {
+    let solid = s.model.state().body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?.body.clone();
+    let measured = solidcraft_kernel::measure(&solid).map_err(|e| bad(cmd, e.to_string()))?;
+    Ok(generative::BoxRegion {
+        min: [measured.bbox.min.x, measured.bbox.min.y, measured.bbox.min.z],
+        max: [measured.bbox.max.x, measured.bbox.max.y, measured.bbox.max.z],
+    })
+}
+
+fn blank_generative(
+    name: String,
+    preserve: Vec<String>,
+    obstacle: Vec<String>,
+    objective: String,
+    loads: Vec<StudyLoad>,
+    constraints: Vec<StudyConstraint>,
+) -> GenerativeStudy {
+    GenerativeStudy {
+        name,
         preserve,
-        obstacle: crate::params::string_list(p, "obstacle"),
+        obstacle,
         objective,
         method: String::new(),
         candidate: None,
-    });
-    Ok(json!({"study": name}))
+        loads,
+        constraints,
+        length: 0.0,
+        width: 0.0,
+        height: 0.0,
+        origin: [0.0, 0.0, 0.0],
+        stale: true,
+    }
+}
+
+fn gen_study(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "generative.study";
+    let name = study_label(cmd, p, "Study")?;
+    let preserve = name_list(cmd, p, "preserve")?;
+    let obstacle = name_list(cmd, p, "obstacle")?;
+    let objective = match str_(p, "objective") {
+        None => None,
+        Some(value) => {
+            if !matches!(value, "stiffness" | "mass") {
+                return Err(bad(cmd, "objective must be stiffness or mass"));
+            }
+            Some(value.to_string())
+        }
+    };
+    let loads = loads_of_params(cmd, p)?;
+    let constraints = constraints_of(cmd, p)?;
+    if let Some(names) = &preserve {
+        require_names(s, cmd, names)?;
+    }
+    if let Some(names) = &obstacle {
+        require_names(s, cmd, names)?;
+    }
+    let index = s.doc.generative.iter().rposition(|study| study.name == name);
+    let Some(index) = index else {
+        let preserve = preserve.filter(|names| !names.is_empty()).ok_or_else(|| bad(cmd, "a generative study needs a preserve body"))?;
+        if s.doc.generative.len() >= MAX_STUDIES {
+            return Err(bad(cmd, "the study exceeds the size cap"));
+        }
+        let objective = objective.unwrap_or_else(|| "stiffness".into());
+        s.doc_mut().generative.push(blank_generative(
+            name.clone(),
+            preserve,
+            obstacle.unwrap_or_default(),
+            objective,
+            loads.unwrap_or_default(),
+            constraints.unwrap_or_default(),
+        ));
+        return Ok(json!({"study": name, "stale": true}));
+    };
+    let Some(study) = s.doc_mut().generative.get_mut(index) else {
+        return Err(bad(cmd, "no study"));
+    };
+    let mut changed = false;
+    if let Some(preserve) = preserve {
+        if preserve.is_empty() {
+            return Err(bad(cmd, "a generative study needs a preserve body"));
+        }
+        if study.preserve != preserve {
+            study.preserve = preserve;
+            changed = true;
+        }
+    }
+    if let Some(obstacle) = obstacle
+        && study.obstacle != obstacle
+    {
+        study.obstacle = obstacle;
+        changed = true;
+    }
+    if let Some(objective) = objective
+        && study.objective != objective
+    {
+        study.objective = objective;
+        changed = true;
+    }
+    if let Some(loads) = loads
+        && study.loads != loads
+    {
+        study.loads = loads;
+        changed = true;
+    }
+    if let Some(constraints) = constraints
+        && study.constraints != constraints
+    {
+        study.constraints = constraints;
+        changed = true;
+    }
+    if changed {
+        study.stale = true;
+    }
+    let stale = study.stale;
+    Ok(json!({"study": name, "stale": stale}))
 }
 
 fn gen_solve(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "generative.solve";
-    let name = str_(p, "name").map(str::to_string);
-    let (preserve, obstacle, objective) = {
+    let wanted = str_(p, "name").map(str::to_string);
+    let (label, preserve, obstacle, objective) = {
         let study = s
             .doc
             .generative
             .iter()
             .rev()
-            .find(|study| name.as_ref().is_none_or(|n| &study.name == n) && !study.preserve.is_empty())
+            .find(|study| wanted.as_ref().is_none_or(|n| &study.name == n) && !study.preserve.is_empty())
             .ok_or_else(|| bad(cmd, "a generative study needs a preserve body"))?;
-        (study.preserve.clone(), study.obstacle.clone(), study.objective.clone())
+        (study.name.clone(), study.preserve.clone(), study.obstacle.clone(), study.objective.clone())
     };
-    let mut min = solidcraft_geom::Vec3::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut max = solidcraft_geom::Vec3::new(f64::MIN, f64::MIN, f64::MIN);
+    let goal = match objective.as_str() {
+        "mass" => Objective::Mass,
+        "stiffness" => Objective::Stiffness,
+        _ => return Err(bad(cmd, "objective must be stiffness or mass")),
+    };
+    let features = feature_ids(s);
+    let mut keep = Vec::with_capacity(preserve.len());
     for body in &preserve {
-        let solid = s.model.state().body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?.body.clone();
-        let measured = solidcraft_kernel::measure(&solid).map_err(|e| bad(cmd, e.to_string()))?;
-        min = solidcraft_geom::Vec3::new(min.x.min(measured.bbox.min.x), min.y.min(measured.bbox.min.y), min.z.min(measured.bbox.min.z));
-        max = solidcraft_geom::Vec3::new(max.x.max(measured.bbox.max.x), max.y.max(measured.bbox.max.y), max.z.max(measured.bbox.max.z));
+        keep.push(body_region(s, cmd, body)?);
     }
-    let mut length = (max.x - min.x).max(0.5);
-    let mut width = (max.y - min.y).max(0.5);
-    let height = (max.z - min.z).max(0.5);
-    if objective == "mass" {
-        width = (width * 0.6).max(0.5);
-    }
+    let mut block = Vec::with_capacity(obstacle.len());
     for body in &obstacle {
-        let Some(solid) = s.model.state().body(body).map(|b| b.body.clone()) else { continue };
-        let Ok(measured) = solidcraft_kernel::measure(&solid) else { continue };
-        let overlaps = measured.bbox.min.x < min.x + length
-            && measured.bbox.max.x > min.x
-            && measured.bbox.min.y < min.y + width
-            && measured.bbox.max.y > min.y
-            && measured.bbox.min.z < min.z + height
-            && measured.bbox.max.z > min.z;
-        if overlaps && measured.bbox.min.x > min.x + 0.5 {
-            length = (measured.bbox.min.x - min.x).min(length).max(0.5);
+        block.push(body_region(s, cmd, body)?);
+    }
+    let candidate = generative::section_reduction(&keep, &block, goal).map_err(|err| bad(cmd, err))?;
+    if feature_ids(s) != features {
+        return Err(bad(cmd, "the study changed the solid"));
+    }
+    if let Some(study) = s.doc_mut().generative.iter_mut().rev().find(|study| study.name == label) {
+        study.method = candidate.method.to_string();
+        study.length = candidate.size[0];
+        study.width = candidate.size[1];
+        study.height = candidate.size[2];
+        study.origin = candidate.origin;
+        study.candidate = None;
+        study.stale = false;
+    }
+    if feature_ids(s) != features {
+        return Err(bad(cmd, "the study changed the solid"));
+    }
+    Ok(json!({
+        "method": candidate.method,
+        "length": candidate.size[0],
+        "width": candidate.size[1],
+        "height": candidate.size[2],
+        "origin": candidate.origin,
+        "stale": false,
+    }))
+}
+
+fn next_candidate_name(s: &Session, cmd: &str) -> Result<String> {
+    if s.model.state().body("Candidate").is_none() {
+        return Ok("Candidate".into());
+    }
+    for index in 2..100 {
+        let name = format!("Candidate {index}");
+        if s.model.state().body(&name).is_none() {
+            return Ok(name);
         }
     }
-    s.execute("solid.box", &json!({"length": length, "width": width, "height": height, "corner": [min.x, min.y, min.z], "body_name": "Candidate"}))?;
-    if let Some(study) = s.doc_mut().generative.iter_mut().rev().find(|study| name.as_ref().is_none_or(|n| &study.name == n)) {
-        study.method = "section-size reduction".into();
-        study.candidate = Some("Candidate".into());
-    }
-    Ok(json!({"candidate": "Candidate", "method": "section-size reduction", "width": width, "length": length, "height": height}))
+    Err(bad(cmd, "the study exceeds the size cap"))
 }
 
 fn gen_promote(s: &mut Session, p: &Value) -> Result<Value> {
-    let name = str_(p, "name");
-    let candidate = s
-        .doc
-        .generative
-        .iter()
-        .rev()
-        .find(|study| name.is_none_or(|n| study.name == n))
-        .and_then(|study| study.candidate.clone())
-        .ok_or_else(|| bad("generative.promote", "generate a candidate first"))?;
-    if s.model.state().body(&candidate).is_none() {
-        return Err(bad("generative.promote", "the candidate body is missing"));
+    let cmd = "generative.promote";
+    let wanted = str_(p, "name");
+    let (label, length, width, height, origin, method, stale, existing) = {
+        let study = s
+            .doc
+            .generative
+            .iter()
+            .rev()
+            .find(|study| wanted.is_none_or(|n| study.name == n))
+            .ok_or_else(|| bad(cmd, "generate a candidate first"))?;
+        (study.name.clone(), study.length, study.width, study.height, study.origin, study.method.clone(), study.stale, study.candidate.clone())
+    };
+    if method.is_empty() || !(length > 0.0 && width > 0.0 && height > 0.0) {
+        return Err(bad(cmd, "generate a candidate first"));
     }
-    Ok(json!({"body": candidate}))
+    if stale {
+        return Err(bad(cmd, "the study is stale; generate again"));
+    }
+    if let Some(body) = &existing
+        && s.model.state().body(body).is_some()
+    {
+        return Ok(json!({"body": body, "method": method}));
+    }
+    let body_name = next_candidate_name(s, cmd)?;
+    let features = feature_ids(s);
+    s.execute(
+        "solid.box",
+        &json!({
+            "length": length,
+            "width": width,
+            "height": height,
+            "corner": origin,
+            "body_name": body_name,
+            "operation": "new",
+        }),
+    )?;
+    if s.model.state().body(&body_name).is_none() || feature_ids(s).len() <= features.len() {
+        return Err(bad(cmd, "the candidate body was not created"));
+    }
+    if let Some(study) = s.doc_mut().generative.iter_mut().rev().find(|study| study.name == label) {
+        study.candidate = Some(body_name.clone());
+    }
+    Ok(json!({"body": body_name, "method": method}))
 }
+
+#[cfg(test)]
+#[path = "sim_tests.rs"]
+mod sim_tests;
 
 fn parts_list(s: &mut Session, p: &Value) -> Result<Value> {
     super::drawing::parts_list(s, p)

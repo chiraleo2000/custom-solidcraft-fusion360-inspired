@@ -2279,7 +2279,46 @@ pub struct CamSetup {
     pub tools: Vec<CamTool>,
 }
 
-/// A study. `tip` is the reported deflection in millimetres for a static beam.
+fn load_direction_z() -> [f64; 3] {
+    [0.0, 0.0, 1.0]
+}
+
+fn load_direction_is_z(direction: &[f64; 3]) -> bool {
+    *direction == [0.0, 0.0, 1.0]
+}
+
+fn origin_is_zero(origin: &[f64; 3]) -> bool {
+    *origin == [0.0, 0.0, 0.0]
+}
+
+fn f64_is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+/// A support on a structural study. `kind` is `fixed` or `pin`. `target` is `min_x` or `max_x`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StudyConstraint {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target: String,
+}
+
+/// A force on a study. `magnitude` is newtons. `direction` defaults to +Z.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StudyLoad {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default)]
+    pub magnitude: f64,
+    #[serde(default = "load_direction_z", skip_serializing_if = "load_direction_is_z")]
+    pub direction: [f64; 3],
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target: String,
+}
+
+/// A structural study. Solving one does not change the solid.
+/// `tip` is the transverse deflection at max X, in millimetres, after a static solve.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Study {
     pub name: String,
@@ -2290,6 +2329,20 @@ pub struct Study {
     pub tip: Option<f64>,
     pub method: String,
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub material: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<StudyConstraint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loads: Vec<StudyLoad>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub displacement_min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub displacement_max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stress_min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stress_max: Option<f64>,
 }
 
 /// Keyed occurrence poses. They are not the assembly's real placements.
@@ -2335,6 +2388,21 @@ pub struct GenerativeStudy {
     pub objective: String,
     pub method: String,
     pub candidate: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loads: Vec<StudyLoad>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<StudyConstraint>,
+    /// Proposed box, millimetres. Zero until a solve records one.
+    #[serde(default, skip_serializing_if = "f64_is_zero")]
+    pub length: f64,
+    #[serde(default, skip_serializing_if = "f64_is_zero")]
+    pub width: f64,
+    #[serde(default, skip_serializing_if = "f64_is_zero")]
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "origin_is_zero")]
+    pub origin: [f64; 3],
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// A machining toolpath. `gcode` is SolidCraft's own text, already in the setup's work coordinates.
