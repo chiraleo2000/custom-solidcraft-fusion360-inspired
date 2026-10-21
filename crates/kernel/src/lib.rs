@@ -90,7 +90,7 @@ pub use measure::{BodyMeasure, measure};
 pub use mesh_convert::convert_prismatic_mesh;
 pub use meshbody::{
     MAX_TRIANGLES, mesh_body, mesh_combine, mesh_deviation, mesh_face_groups, mesh_faceted, mesh_plane_cut, mesh_reduce, mesh_remesh, mesh_repair,
-    mesh_reverse, mesh_separate, mesh_shell, mesh_smooth,
+    mesh_reverse, mesh_section, mesh_separate, mesh_shell, mesh_smooth,
 };
 pub use native::{decode_native_body, encode_native_body};
 pub use offset::with_same_surface;

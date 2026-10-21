@@ -493,6 +493,34 @@ mod tests {
         crate::extrude_planar_regions(&Plane::XY, &[Region2 { outer, holes }], 0., 3.).unwrap()
     }
 
+    /// Feature: fusion360-feature-parity, Property 14: Mesh conversion face counts are correct per mode
+    #[test]
+    fn property_14_faceted_face_count_matches_triangles_and_prismatic_does_not_grow() {
+        let mut cases = 0usize;
+        for i in 1..=100 {
+            let (x, y, z) = (2.0 + (i % 7) as f64, 3.0 + (i % 5) as f64, 4.0 + (i % 3) as f64);
+            let solid = crate::box_solid(Vec3::ZERO, Vec3::new(x, y, z)).unwrap();
+            let tess = solid.tessellate(0.2).unwrap();
+            let mesh = crate::mesh_body(&tess.positions, &tess.triangles).unwrap();
+            let tris = mesh.triangle_mesh().unwrap().1.len();
+            let faceted = crate::mesh_faceted(&mesh).unwrap_or_else(|e| panic!("facet {i}: {e}"));
+            assert_eq!(faceted.face_count(), tris, "case {i}");
+            assert!(!faceted.is_mesh());
+            if let Ok(prism) = convert_prismatic_mesh(&mesh, 0.05) {
+                assert!(prism.face_count() <= tris, "prismatic grew faces, case {i}");
+                assert!(prism.face_count() >= 4);
+            }
+            cases += 1;
+        }
+        let cylinder = crate::cylinder(Vec3::ZERO, Vec3::Z, 8.0, 12.0).unwrap();
+        let mesh = mesh_of(&cylinder);
+        let tris = mesh.triangle_mesh().unwrap().1.len();
+        let prism = convert_prismatic_mesh(&mesh, 0.05).unwrap();
+        assert!(prism.face_count() <= tris);
+        assert_eq!(crate::measure(&prism).unwrap().merged.face_types.get("cylinder").copied(), Some(1));
+        assert!(cases >= 100, "{cases}");
+    }
+
     #[test]
     fn many_holes_are_refused_promptly_instead_of_stalling() {
         // 400 holes would be ~80k loop pairs and ~160k planar booleans.

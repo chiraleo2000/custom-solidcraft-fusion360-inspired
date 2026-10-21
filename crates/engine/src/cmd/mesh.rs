@@ -123,84 +123,34 @@ fn section(s: &mut Session, p: &Value) -> Result<Value> {
     let body = str_(p, "body").filter(|b| !b.trim().is_empty()).ok_or_else(|| bad(cmd, "select a mesh body"))?;
     let origin = p.get("origin").and_then(vec3).ok_or_else(|| bad(cmd, "`origin` must be [x,y,z]"))?;
     let normal = p.get("normal").and_then(vec3).and_then(|n| n.normalized()).ok_or_else(|| bad(cmd, "`normal` must be a direction"))?;
-    let (positions, triangles) = {
+    let loops = {
         let state = s.model.state();
         let source = state.body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
-        source.body.triangle_mesh().map(|(pos, tri)| (pos.to_vec(), tri.to_vec())).ok_or_else(|| bad(cmd, "select a mesh body"))?
+        solidcraft_kernel::mesh_section(&source.body, origin, normal).map_err(|e| bad(cmd, e.to_string()))?
     };
-    let mut pts = Vec::new();
-    for t in &triangles {
-        let tri: Vec<solidcraft_geom::Vec3> = t.iter().filter_map(|i| positions.get(*i as usize).copied()).collect();
-        let [a, b, c] = tri.as_slice() else { continue };
-        for (p0, p1) in [(*a, *b), (*b, *c), (*c, *a)] {
-            let (s0, s1) = ((p0 - origin).dot(normal), (p1 - origin).dot(normal));
-            if s0 * s1 < 0.0 {
-                let t = s0 / (s0 - s1);
-                pts.push(p0 + (p1 - p0) * t);
-            }
-        }
-    }
-    if pts.len() < 2 {
-        return Err(bad(cmd, "the plane misses the mesh"));
-    }
     let name = str_(p, "name").unwrap_or("Mesh Section");
     let x = normal.any_perp();
     let y = normal.cross(x);
+    let plane = solidcraft_geom::Plane { origin, x, y };
     s.execute(
         "sketch.create",
         &serde_json::json!({"plane": {"origin": [origin.x, origin.y, origin.z], "x_dir": [x.x, x.y, x.z], "y_dir": [y.x, y.y, y.z]}, "name": name}),
     )?;
-    let plane = solidcraft_geom::Plane { origin, x, y };
-    let local: Vec<solidcraft_geom::Vec2> = pts.iter().map(|q| plane.to_local(*q)).collect();
-    let loops = section_loops(&local);
-    if loops.is_empty() {
-        return Err(bad(cmd, "the plane misses the mesh"));
-    }
     for ring in &loops {
-        let chain: Vec<[f64; 2]> = ring.iter().map(|q| [q.x, q.y]).collect();
+        let chain: Vec<[f64; 2]> = ring
+            .iter()
+            .map(|q| {
+                let p = plane.to_local(*q);
+                [p.x, p.y]
+            })
+            .collect();
         if chain.len() >= 2 {
-            let _ = s.execute("sketch.line", &serde_json::json!({"points": chain, "infer": false}));
+            s.execute("sketch.line", &serde_json::json!({"points": chain, "infer": false, "connect": false, "closed": true}))?;
         }
     }
     s.execute("sketch.finish", &serde_json::json!({}))?;
     let points = loops.iter().map(Vec::len).sum::<usize>();
     Ok(serde_json::json!({"sketch": name, "points": points, "loops": loops.len()}))
-}
-
-/// Chain section points into closed loops. Points closer than 0.05 mm are the same vertex.
-fn section_loops(points: &[solidcraft_geom::Vec2]) -> Vec<Vec<solidcraft_geom::Vec2>> {
-    let mut unused: Vec<solidcraft_geom::Vec2> = Vec::new();
-    for point in points {
-        if unused.iter().all(|kept| kept.dist(*point) > 0.05) {
-            unused.push(*point);
-        }
-    }
-    let mut loops = Vec::new();
-    while let Some(start) = unused.first().copied() {
-        let mut loop_pts = vec![start];
-        unused.remove(0);
-        while let Some((index, _)) =
-            unused.iter().enumerate().filter_map(|(i, point)| loop_pts.last().map(|end| (i, end.dist(*point)))).min_by(|a, b| a.1.total_cmp(&b.1))
-        {
-            let Some(end) = loop_pts.last().copied() else { break };
-            let Some(next) = unused.get(index).copied() else { break };
-            if end.dist(next) > 5.0 && loop_pts.len() > 2 {
-                break;
-            }
-            loop_pts.push(next);
-            unused.remove(index);
-            if loop_pts.len() > 2 && next.dist(start) < 0.2 {
-                break;
-            }
-            if loop_pts.len() > 10_000 {
-                break;
-            }
-        }
-        if loop_pts.len() >= 3 {
-            loops.push(loop_pts);
-        }
-    }
-    loops
 }
 
 fn mesh_feature(s: &mut Session, p: &Value, cmd: &str, kind: impl FnOnce(String) -> Result<FeatureKind>) -> Result<Value> {
@@ -210,6 +160,14 @@ fn mesh_feature(s: &mut Session, p: &Value, cmd: &str, kind: impl FnOnce(String)
 
 fn remesh(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "mesh.remesh";
+    if let Some(Value::Number(n)) = p.get("target") {
+        let Some(v) = n.as_f64() else {
+            return Err(bad(cmd, "remesh target is out of range"));
+        };
+        if !v.is_finite() || v < 1.0 || v > solidcraft_kernel::MAX_TRIANGLES as f64 {
+            return Err(bad(cmd, "remesh target is out of range"));
+        }
+    }
     let target = expr(p, "target").unwrap_or_else(|| "1000".into());
     check_expr(s, &target, Kind::Unitless, cmd, "target")?;
     mesh_feature(s, p, cmd, |body| Ok(FeatureKind::MeshRemesh { body, target }))
@@ -263,4 +221,193 @@ fn deviation(s: &mut Session, p: &Value) -> Result<Value> {
     let mesh_body = state.body(mesh).ok_or_else(|| bad(cmd, format!("no body `{mesh}`")))?;
     let (max, mean) = solidcraft_kernel::mesh_deviation(&solid.body, &mesh_body.body).map_err(|e| bad(cmd, e.to_string()))?;
     Ok(serde_json::json!({"max": max, "mean": mean}))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+    use solidcraft_doc::{FeatureKind, MeshData};
+    use solidcraft_geom::Seg2;
+
+    use crate::{EngineError, Session, find_command};
+
+    fn run(s: &mut Session, id: &str, p: Value) -> Value {
+        s.execute(id, &p).unwrap_or_else(|e| panic!("{id} {p}: {e}"))
+    }
+
+    fn with_scan() -> (Session, usize) {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Box"}));
+        let mesh = s.model.state().body("Box").unwrap().body.tessellate(0.2).unwrap();
+        let count = mesh.triangles.len();
+        let positions: Vec<f64> = mesh.positions.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        let triangles: Vec<u32> = mesh.triangles.iter().flat_map(|t| *t).collect();
+        s.doc_mut()
+            .add_feature(
+                FeatureKind::MeshImport { file: "scan".into(), meshes: vec![MeshData { name: "Scan".into(), positions, triangles, color: None }] },
+                Some("Scan"),
+            )
+            .unwrap();
+        s.refresh();
+        (s, count)
+    }
+
+    #[test]
+    fn section_groups_deviation_and_remesh_round_trip_a_box() {
+        let (mut s, count) = with_scan();
+        assert!(!find_command("mesh.deviation").unwrap().undoable);
+        assert!(!find_command("mesh.face_groups").unwrap().undoable);
+        let features = s.doc.features.len();
+        let undo = s.undo.len();
+        let groups = run(&mut s, "mesh.face_groups", json!({"body": "Scan"}));
+        let grouped: u64 = groups["groups"].as_array().unwrap().iter().map(|g| g["triangles"].as_u64().unwrap()).sum();
+        assert_eq!(grouped, count as u64, "{groups}");
+        assert_eq!(s.doc.features.len(), features);
+        assert_eq!(s.undo.len(), undo);
+        let before = s.doc.to_json();
+        let section = run(&mut s, "mesh.section", json!({"body": "Scan", "origin": [0, 0, 5], "normal": [0, 0, 1], "name": "Cut"}));
+        assert!(section["loops"].as_u64().unwrap() >= 1, "{section}");
+        let state = s.model.state();
+        let sketch = state.sketches.iter().find(|k| k.name == "Cut").unwrap();
+        assert!(!sketch.sketch.curves.is_empty());
+        for ci in 0..sketch.sketch.curves.len() {
+            for seg in sketch.sketch.segs(ci) {
+                if let Seg2::Line { a, b } = seg {
+                    for q in [a, b] {
+                        let w = sketch.plane.to_world(q);
+                        assert!((w.z - 5.0).abs() < 1e-4, "section point left the plane: {w:?}");
+                    }
+                }
+            }
+        }
+        let undo_after_section = s.undo.len();
+        let report = run(&mut s, "mesh.deviation", json!({"body": "Box", "mesh": "Scan"}));
+        let (max, mean) = (report["max"].as_f64().unwrap(), report["mean"].as_f64().unwrap());
+        assert!(max.is_finite() && mean.is_finite() && max >= 0.0 && mean >= 0.0 && mean <= max + 1e-9, "{report}");
+        assert!(mean < 0.05 && max < 0.05, "{report}");
+        assert_eq!(s.undo.len(), undo_after_section, "deviation is read-only");
+        assert!(undo_after_section > undo, "the section is undoable");
+        let missed = s.doc.to_json();
+        assert!(s.execute("mesh.section", &json!({"body": "Scan", "origin": [0, 0, 80], "normal": [0, 0, 1]})).is_err());
+        assert_eq!(s.doc.to_json(), missed);
+        let target = (count / 2).max(1);
+        run(&mut s, "mesh.remesh", json!({"body": "Scan", "target": target}));
+        let left = s.model.state().body("Scan").unwrap().body.triangle_mesh().unwrap().1.len();
+        assert!(left > 0 && left <= count, "{left} vs {count} target {target}");
+        assert_ne!(s.doc.to_json(), before);
+        let (mut fresh, tris) = with_scan();
+        run(&mut fresh, "mesh.convert", json!({"body": "Scan", "mode": "faceted"}));
+        let body = fresh.model.state().body("Scan").unwrap().body.clone();
+        assert!(!body.is_mesh());
+        assert_eq!(body.face_count(), tris);
+    }
+
+    #[test]
+    fn a_cut_through_two_meshes_returns_two_loops() {
+        let mut s = Session::default();
+        let left = solidcraft_kernel::box_solid(solidcraft_geom::Vec3::ZERO, solidcraft_geom::Vec3::new(10.0, 10.0, 10.0)).unwrap();
+        let right = solidcraft_kernel::box_solid(solidcraft_geom::Vec3::new(30.0, 0.0, 0.0), solidcraft_geom::Vec3::new(40.0, 10.0, 10.0)).unwrap();
+        let (la, ra) = (left.tessellate(0.2).unwrap(), right.tessellate(0.2).unwrap());
+        let la_body = solidcraft_kernel::mesh_body(&la.positions, &la.triangles).unwrap();
+        let ra_body = solidcraft_kernel::mesh_body(&ra.positions, &ra.triangles).unwrap();
+        let both = solidcraft_kernel::mesh_combine(&la_body, &ra_body).unwrap();
+        let (positions, triangles) = both.triangle_mesh().unwrap();
+        s.doc_mut()
+            .add_feature(
+                FeatureKind::MeshImport {
+                    file: "pair".into(),
+                    meshes: vec![MeshData {
+                        name: "Pair".into(),
+                        positions: positions.iter().flat_map(|p| [p.x, p.y, p.z]).collect(),
+                        triangles: triangles.iter().flat_map(|t| *t).collect(),
+                        color: None,
+                    }],
+                },
+                Some("Pair"),
+            )
+            .unwrap();
+        s.refresh();
+        let section = run(&mut s, "mesh.section", json!({"body": "Pair", "origin": [0, 0, 5], "normal": [0, 0, 1], "name": "Both"}));
+        assert!(section["loops"].as_u64().unwrap() >= 2, "{section}");
+    }
+
+    /// Feature: fusion360-feature-parity, Property 1: Hostile mesh parameters never panic
+    #[test]
+    fn property_1_hostile_mesh_commands_do_not_panic() {
+        let ids = [
+            "mesh.convert",
+            "mesh.plane_cut",
+            "mesh.repair",
+            "mesh.reduce",
+            "mesh.face_groups",
+            "mesh.section",
+            "mesh.remesh",
+            "mesh.smooth",
+            "mesh.separate",
+            "mesh.combine",
+            "mesh.merge_groups",
+            "mesh.shell",
+            "mesh.reverse",
+            "mesh.deviation",
+        ];
+        let payloads = [
+            json!(null),
+            json!({}),
+            json!({"body": ""}),
+            json!({"body": "Missing"}),
+            json!({"body": "Scan", "target": 0}),
+            json!({"body": "Scan", "target": -3}),
+            json!({"body": "Scan", "target": 1e20}),
+            json!({"body": "Scan", "ratio": 0}),
+            json!({"body": "Scan", "ratio": 4}),
+            json!({"body": "Scan", "mode": "nurbs"}),
+            json!({"body": "Scan", "origin": [0, 0, 0], "normal": [0, 0, 0], "keep": [1, 0, 0]}),
+            json!({"body": "Scan", "iterations": 1000}),
+            json!({"body": "Scan", "thickness": "nope"}),
+            json!({"a": "Scan", "b": "Scan", "operation": "cut"}),
+            json!({"body": "Box", "mesh": "Missing"}),
+            json!({"body": "Scan", "tolerance": "nope"}),
+        ];
+        let base = {
+            let mut s = Session::default();
+            s.doc_mut()
+                .add_feature(
+                    FeatureKind::MeshImport {
+                        file: "scan".into(),
+                        meshes: vec![MeshData {
+                            name: "Scan".into(),
+                            positions: vec![0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 2.0, 3.0, 8.0],
+                            triangles: vec![0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3],
+                            color: None,
+                        }],
+                    },
+                    Some("Scan"),
+                )
+                .unwrap();
+            s.refresh();
+            s.doc.as_ref().clone()
+        };
+        let mut cases = 0usize;
+        for id in ids {
+            for payload in &payloads {
+                let mut s = Session::new(base.clone());
+                let before = s.doc.to_json();
+                match s.execute(id, payload) {
+                    Err(EngineError::Internal(cmd, msg)) => panic!("{cmd} {payload} panicked: {msg}"),
+                    Err(_) => assert_eq!(s.doc.to_json(), before, "{id} changed the design on error"),
+                    Ok(_) => {}
+                }
+                cases += 1;
+            }
+        }
+        let (mut s, _) = with_scan();
+        let before = s.doc.to_json();
+        let err = s.execute("mesh.combine", &json!({"a": "Scan", "b": "Box", "operation": "cut"})).unwrap_err();
+        assert!(err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.to_json(), before);
+        let err = s.execute("mesh.remesh", &json!({"body": "Scan", "target": "30000000"})).unwrap_err();
+        assert!(!matches!(err, EngineError::Internal(_, _)), "{err}");
+        assert_eq!(s.doc.to_json(), before);
+        assert!(cases >= 100, "{cases}");
+    }
 }
