@@ -1,6 +1,10 @@
 /target*/
 /plan/
 /dist/
+# Local scratch and third-party manuals — never commit
+/crates/engine/((((((((((1
+/crates/engine/nope
+*.pdf
 *~
 .DS_Store
 *.swp
