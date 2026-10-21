@@ -1,7 +1,7 @@
 //! File formats. Designs use JSON or versioned containers (`.solidcraft`); the authoritative
 //! document rebuilds on load and optional display caches remain provisional. Bodies export
-//! as STL (binary or ASCII), OBJ, STEP and 3MF; STEP
-//! files import as a base feature (see [`step_import_feature`]), 3MF and STL files as mesh bodies
+//! as STL (binary or ASCII), OBJ, STEP and 3MF. A board exports as a Gerber RS-274X subset.
+//! STEP files import as a base feature (see [`step_import_feature`]), 3MF and STL files as mesh bodies
 //! (see [`mesh_import_feature`]).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
@@ -20,6 +20,8 @@ mod svg;
 mod threemf;
 pub mod vfs;
 
+mod gerber;
+pub use gerber::{GerberLayer, GerberTrace, read_gerber, write_gerber};
 mod drawing_out;
 pub use drawing_out::{DrawKind, DrawSeg, DrawText, write_drawing_dxf, write_drawing_pdf, write_drawing_svg};
 pub use dxf::{read_dxf, write_dxf};

@@ -1,5 +1,6 @@
 //! Later-workspace commands: machining setups, static stress, render, animation,
-//! a small schematic check, and a generative candidate. Each one is a SolidCraft command.
+//! schematic and PCB checks, and a generative candidate. Each one is a SolidCraft command.
+//! PCB autorouting stays deferred.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -7,7 +8,10 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use solidcraft_doc::motion::ExplodedView;
-use solidcraft_doc::{CamSetup, CamTool, GenerativeStudy, RenderScene, Schematic, StoryKey, Storyboard, Study, StudyConstraint, StudyLoad};
+use solidcraft_doc::{
+    Board, CamSetup, CamTool, EcadComponent, EcadNet, EcadTrace, GenerativeStudy, RenderScene, Schematic, StoryKey, Storyboard, Study,
+    StudyConstraint, StudyLoad,
+};
 use solidcraft_geom::fea::{self, BeamEnd, BeamLoad, BeamSection, BeamSupport};
 use solidcraft_geom::generative::{self, Objective};
 use solidcraft_geom::{Mesh, Vec3};
@@ -125,16 +129,24 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("anim.publish", "Publish Storyboard", anim_publish).noundo().params(
         "path: png; frames?: 1…24; story?: name. One image, or stem_000.png … when there are several frames. Video files are not supported yet. Placements stay unchanged",
     ),
-    CommandSpec::new("ecad.schematic", "Schematic", ecad_schematic).params("parts?: [names]"),
-    CommandSpec::new("ecad.wire", "Wire", ecad_wire).params("a, b: pin names"),
-    CommandSpec::new("ecad.erc", "Electrical Rules", ecad_erc)
-        .noundo()
-        .params("shorts between a power net and a ground net, including through other pins, and parts with no wire"),
-    CommandSpec::new("ecad.board", "Board", ecad_board).params("width, height: mm"),
-    CommandSpec::new("ecad.trace", "Trace", ecad_trace).params("x0, y0, x1, y1, width: mm"),
-    CommandSpec::new("ecad.drc", "Design Rules", ecad_drc).noundo().params("clearance?: mm. Reports a short gap and does not move copper"),
-    CommandSpec::new("ecad.push_3d", "Push Board to 3D", ecad_push).params("makes a PCB body from the board outline"),
-    CommandSpec::new("ecad.export", "Export Gerber", ecad_export).noundo().params("path: text file in a public Gerber subset"),
+    CommandSpec::new("ecad.schematic", "Schematic", ecad_schematic).params(
+        "parts?: [refdes | {refdes, pins?, x?, y?}]; nets?: [{name, nodes}]. Stores components and nets. Part libraries are not supported yet. PCB autorouting is not supported yet",
+    ),
+    CommandSpec::new("ecad.wire", "Wire", ecad_wire).params("a, b: pin or net names. Joins them into a stored net. Does not route copper"),
+    CommandSpec::new("ecad.erc", "Electrical Rules", ecad_erc).noundo().params(
+        "Reports shorts between a power name and a ground name, unconnected parts, and open pins. Does not modify the schematic",
+    ),
+    CommandSpec::new("ecad.board", "Board", ecad_board).params("width, height: mm. One copper layer. PCB autorouting is not supported yet"),
+    CommandSpec::new("ecad.trace", "Trace", ecad_trace).params("x0, y0, x1, y1, width: mm; net?: name. Places copper; it does not autoroute"),
+    CommandSpec::new("ecad.drc", "Design Rules", ecad_drc).noundo().params(
+        "clearance?: mm (default 0.2, copper edge gap); min_width?: mm (default 0.15). Reports clearance and width violations and does not move copper. Same-net copper may touch",
+    ),
+    CommandSpec::new("ecad.push_3d", "Push Board to 3D", ecad_push).params(
+        "thickness?: mm (default 1.6). Creates a PCB component and a board body in the assembly. Component models and PCB autorouting are not supported yet",
+    ),
+    CommandSpec::new("ecad.export", "Export Gerber", ecad_export).noundo().params(
+        "path: Gerber RS-274X subset (public Ucamco Gerber Layer Format), millimetres, outline plus one copper layer. Read back with the same subset. PCB autorouting is not supported yet",
+    ),
     CommandSpec::new("drawing.export_dxf", "Export Drawing DXF", drawing_dxf).noundo().params("path: ASCII DXF of the sheet's projected model edges"),
     CommandSpec::new("generative.study", "Generative Study", gen_study).params(
         "name?; preserve: [body names]; obstacle?: [names]; loads?: [{kind, magnitude, direction, target}]; constraints?: [{kind, target}]; objective?: stiffness|mass. Changing inputs marks the study stale",
@@ -2159,25 +2171,439 @@ fn anim_publish(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"path": path, "frames": frames, "paths": paths}))
 }
 
+// Electronics. Part names are the caller's; there is no vendor library.
+// ERC and DRC only report. PCB autorouting stays deferred.
+const MAX_ECAD_PARTS: usize = 1024;
+const MAX_ECAD_PINS: usize = 64;
+const MAX_ECAD_WIRES: usize = 4096;
+const MAX_ECAD_TRACES: usize = 4096;
+const MAX_ECAD_NETS: usize = 1024;
+const MAX_ECAD_NODES: usize = 8192;
+const MAX_ECAD_NAME: usize = 64;
+const DEFAULT_CLEARANCE: f64 = 0.2;
+const DEFAULT_MIN_WIDTH: f64 = 0.15;
+const DEFAULT_THICKNESS: f64 = 1.6;
+
 fn ecad_schematic(s: &mut Session, p: &Value) -> Result<Value> {
-    let parts = crate::params::string_list(p, "parts");
-    s.doc_mut().schematic = Some(Schematic { parts, wires: Vec::new(), board_width: 0.0, board_height: 0.0, traces: Vec::new() });
-    Ok(json!({"parts": s.doc.schematic.as_ref().map(|s| s.parts.len()).unwrap_or(0)}))
+    let cmd = "ecad.schematic";
+    ecad_deferred(p, cmd)?;
+    let components = read_components(cmd, p)?;
+    let explicit = read_nets(cmd, p)?;
+    let wires = expand_nets(cmd, &explicit)?;
+    let (board_width, board_height, traces) = preserved_layout(s);
+    let parts = components.iter().map(|part| part.refdes.clone()).collect();
+    let mut schematic = Schematic { parts, wires, board_width, board_height, traces, components, nets: explicit };
+    store_nets(cmd, &mut schematic)?;
+    let parts = schematic.parts.len();
+    let components = schematic.components.len();
+    let nets = schematic.nets.len();
+    let wires = schematic.wires.len();
+    s.doc_mut().schematic = Some(schematic);
+    Ok(json!({"parts": parts, "components": components, "nets": nets, "wires": wires}))
 }
 
 fn ecad_wire(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ecad.wire";
-    let a = str_(p, "a").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`a` is required"))?.to_string();
-    let b = str_(p, "b").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`b` is required"))?.to_string();
-    let schematic = s.doc_mut().schematic.get_or_insert(Schematic {
-        parts: Vec::new(),
-        wires: Vec::new(),
-        board_width: 0.0,
-        board_height: 0.0,
-        traces: Vec::new(),
-    });
+    ecad_deferred(p, cmd)?;
+    let a = ecad_name(cmd, str_(p, "a").ok_or_else(|| bad(cmd, "`a` is required"))?, "a", true)?;
+    let b = ecad_name(cmd, str_(p, "b").ok_or_else(|| bad(cmd, "`b` is required"))?, "b", true)?;
+    if a.eq_ignore_ascii_case(&b) {
+        return Err(bad(cmd, "a wire needs two different names"));
+    }
+    if s.doc.schematic.as_ref().is_some_and(|schematic| schematic.wires.len() >= MAX_ECAD_WIRES) {
+        return Err(bad(cmd, "too many wires"));
+    }
+    let schematic = s.doc_mut().schematic.get_or_insert_with(Schematic::default);
     schematic.wires.push((a, b));
-    Ok(json!({"wires": schematic.wires.len()}))
+    store_nets(cmd, schematic)?;
+    Ok(json!({"wires": schematic.wires.len(), "nets": schematic.nets.len()}))
+}
+
+fn ecad_erc(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ecad.erc";
+    ecad_deferred(p, cmd)?;
+    let before = s.doc.to_json();
+    let report = match s.doc.schematic.clone() {
+        None => json!({"shorts": 0, "unconnected": 0, "open_pins": 0, "nets": 0}),
+        Some(schematic) => erc_report(cmd, &schematic)?,
+    };
+    if s.doc.to_json() != before {
+        return Err(bad(cmd, "the check edited the schematic"));
+    }
+    Ok(report)
+}
+
+fn ecad_board(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ecad.board";
+    ecad_deferred(p, cmd)?;
+    let width = positive_mm(cmd, p, "width")?;
+    let height = positive_mm(cmd, p, "height")?;
+    let traces = copper(s);
+    if traces.iter().any(|trace| !trace_ok(trace)) {
+        return Err(bad(cmd, "a trace is not usable"));
+    }
+    set_layout(s, width, height, traces);
+    let count = s.doc.board.as_ref().map(|board| board.traces.len()).unwrap_or(0);
+    Ok(json!({"width": width, "height": height, "traces": count}))
+}
+
+fn ecad_trace(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ecad.trace";
+    ecad_deferred(p, cmd)?;
+    let mut coords = [0.0; 4];
+    for (index, key) in ["x0", "y0", "x1", "y1"].into_iter().enumerate() {
+        let value = p.get(key).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("`{key}` is required")))?;
+        if let Some(slot) = coords.get_mut(index) {
+            *slot = board_mm(cmd, value, key)?;
+        }
+    }
+    let width = positive_mm(cmd, p, "width")?;
+    if width >= 100.0 {
+        return Err(bad(cmd, "trace width must be under 100 mm"));
+    }
+    let net = match str_(p, "net") {
+        None => String::new(),
+        Some(net) => ecad_name(cmd, net, "net", true)?,
+    };
+    let mut traces = copper(s);
+    if traces.len() >= MAX_ECAD_TRACES {
+        return Err(bad(cmd, "too many traces"));
+    }
+    if traces.iter().any(|trace| !trace_ok(trace)) {
+        return Err(bad(cmd, "a trace is not usable"));
+    }
+    let (board_width, board_height) = s
+        .doc
+        .board
+        .as_ref()
+        .map(|board| (board.width, board.height))
+        .unwrap_or_else(|| s.doc.schematic.as_ref().map(|schematic| (schematic.board_width, schematic.board_height)).unwrap_or((0.0, 0.0)));
+    traces.push(EcadTrace { x0: coords[0], y0: coords[1], x1: coords[2], y1: coords[3], width, net });
+    set_layout(s, board_width, board_height, traces);
+    let count = s.doc.board.as_ref().map(|board| board.traces.len()).unwrap_or(0);
+    Ok(json!({"traces": count}))
+}
+
+fn ecad_drc(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ecad.drc";
+    ecad_deferred(p, cmd)?;
+    let clearance = optional_mm(cmd, p, "clearance", DEFAULT_CLEARANCE)?;
+    let min_width = optional_mm(cmd, p, "min_width", DEFAULT_MIN_WIDTH)?;
+    let before = s.doc.to_json();
+    let traces = copper(s);
+    let (clearance_hits, width_hits) = count_drc(&traces, clearance, min_width)?;
+    if s.doc.to_json() != before {
+        return Err(bad(cmd, "the check moved the copper"));
+    }
+    Ok(json!({"violations": clearance_hits + width_hits, "clearance": clearance_hits, "width": width_hits}))
+}
+
+fn ecad_push(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ecad.push_3d";
+    ecad_deferred(p, cmd)?;
+    if p.get("models").and_then(Value::as_bool) == Some(true) {
+        return Err(bad(cmd, "not supported yet: component models on the board"));
+    }
+    let thickness = thickness_of(p, cmd)?;
+    let (width, height) = board_size(s).ok_or_else(|| bad(cmd, "create a board first"))?;
+    if pcb_exists(s) {
+        return existing_board(width, height, thickness, pcb_volume(s));
+    }
+    let active = s.active_component;
+    let active_path = s.active_occurrence_path.clone();
+    let placed = place_board(s, width, height, thickness);
+    s.active_component = active;
+    s.active_occurrence_path = active_path;
+    placed
+}
+
+fn ecad_export(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ecad.export";
+    // Public Gerber RS-274X subset. PCB autorouting stays deferred.
+    ecad_deferred(p, cmd)?;
+    let path = usable_path(p, cmd)?;
+    let (width, height) = board_size(s).ok_or_else(|| bad(cmd, "create a board first"))?;
+    let traces = copper(s);
+    if traces.iter().any(|trace| !trace_ok(trace)) {
+        return Err(bad(cmd, "a trace is not usable"));
+    }
+    let layer = solidcraft_io::GerberLayer {
+        width,
+        height,
+        traces: traces
+            .iter()
+            .map(|trace| solidcraft_io::GerberTrace { x0: trace.x0, y0: trace.y0, x1: trace.x1, y1: trace.y1, width: trace.width })
+            .collect(),
+    };
+    let text = solidcraft_io::write_gerber(&layer).map_err(|err| bad(cmd, err.to_string()))?;
+    let back = solidcraft_io::read_gerber(&text).map_err(|err| bad(cmd, format!("export was not readable: {err}")))?;
+    if (back.width - width).abs() > 1e-4 || (back.height - height).abs() > 1e-4 || back.traces.len() != layer.traces.len() {
+        return Err(bad(cmd, "export did not round-trip"));
+    }
+    let before = s.doc.to_json();
+    solidcraft_io::write_atomic(Path::new(path), text.as_bytes(), false).map_err(|err| bad(cmd, format!("{path}: {err}")))?;
+    if s.doc.to_json() != before {
+        return Err(bad(cmd, "export changed the design"));
+    }
+    Ok(json!({"path": path, "format": "gerber-rs274x", "traces": layer.traces.len()}))
+}
+
+fn ecad_deferred(p: &Value, cmd: &str) -> Result<()> {
+    if matches!(p.get("autoroute"), Some(Value::Bool(true))) || matches!(p.get("route"), Some(Value::Bool(true))) {
+        return Err(bad(cmd, "not supported yet: PCB autorouting"));
+    }
+    let Some(layer) = p.get("layer") else { return Ok(()) };
+    let top = match layer {
+        Value::String(name) => name.eq_ignore_ascii_case("top") || name == "1",
+        Value::Number(number) => number.as_u64() == Some(1),
+        _ => false,
+    };
+    if top { Ok(()) } else { Err(bad(cmd, "not supported yet: only one copper layer")) }
+}
+
+fn ecad_name(cmd: &str, raw: &str, what: &str, dotted: bool) -> Result<String> {
+    let name = raw.trim();
+    let rejected = |c: char| c.is_control() || c.is_whitespace() || matches!(c, '*' | '%' | ',' | '"') || (!dotted && c == '.');
+    if name.is_empty() || name.len() > MAX_ECAD_NAME || name.chars().any(rejected) {
+        return Err(bad(cmd, format!("`{what}` must be 1…{MAX_ECAD_NAME} characters")));
+    }
+    Ok(name.to_string())
+}
+
+fn board_mm(cmd: &str, value: f64, what: &str) -> Result<f64> {
+    let value = finite(cmd, value, what)?;
+    if value.abs() >= 10_000.0 {
+        return Err(bad(cmd, format!("`{what}` must be within ±9999 mm")));
+    }
+    Ok(value)
+}
+
+fn positive_mm(cmd: &str, p: &Value, key: &str) -> Result<f64> {
+    let value = p.get(key).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("`{key}` is required")))?;
+    let value = board_mm(cmd, value, key)?;
+    if value <= 0.0 {
+        return Err(bad(cmd, format!("`{key}` must be positive")));
+    }
+    Ok(value)
+}
+
+fn optional_mm(cmd: &str, p: &Value, key: &str, default: f64) -> Result<f64> {
+    let Some(value) = p.get(key) else { return Ok(default) };
+    let value = value.as_f64().ok_or_else(|| bad(cmd, format!("`{key}` must be a number")))?;
+    let value = finite(cmd, value, key)?;
+    if value < 0.0 || value >= 10_000.0 {
+        return Err(bad(cmd, format!("`{key}` must be from 0 to 9999 mm")));
+    }
+    Ok(value)
+}
+
+fn thickness_of(p: &Value, cmd: &str) -> Result<f64> {
+    let thickness = optional_mm(cmd, p, "thickness", DEFAULT_THICKNESS)?;
+    if thickness <= 0.0 || thickness > 100.0 {
+        return Err(bad(cmd, "`thickness` must be positive and at most 100 mm"));
+    }
+    Ok(thickness)
+}
+
+fn read_components(cmd: &str, p: &Value) -> Result<Vec<EcadComponent>> {
+    let Some(value) = p.get("parts") else { return Ok(Vec::new()) };
+    match value {
+        Value::String(name) => Ok(vec![bare_part(cmd, name)?]),
+        Value::Array(items) => read_part_list(cmd, items),
+        _ => Err(bad(cmd, "`parts` must be a list of names")),
+    }
+}
+
+fn bare_part(cmd: &str, name: &str) -> Result<EcadComponent> {
+    Ok(EcadComponent { refdes: ecad_name(cmd, name, "refdes", false)?, ..EcadComponent::default() })
+}
+
+fn read_part_list(cmd: &str, items: &[Value]) -> Result<Vec<EcadComponent>> {
+    if items.len() > MAX_ECAD_PARTS {
+        return Err(bad(cmd, "too many parts"));
+    }
+    let mut components = Vec::with_capacity(items.len());
+    for item in items {
+        let component = match item {
+            Value::String(name) => bare_part(cmd, name)?,
+            Value::Object(obj) => read_part_object(cmd, obj)?,
+            _ => return Err(bad(cmd, "`parts` must be a list of names")),
+        };
+        if components.iter().any(|have: &EcadComponent| have.refdes.eq_ignore_ascii_case(&component.refdes)) {
+            return Err(bad(cmd, "a refdes is repeated"));
+        }
+        components.push(component);
+    }
+    Ok(components)
+}
+
+fn read_part_object(cmd: &str, obj: &serde_json::Map<String, Value>) -> Result<EcadComponent> {
+    if ["footprint", "library", "package", "mpn"].iter().any(|key| obj.contains_key(*key)) {
+        return Err(bad(cmd, "not supported yet: part libraries. Components are refdes and pin names only"));
+    }
+    let refdes = obj.get("refdes").or_else(|| obj.get("name")).and_then(Value::as_str).ok_or_else(|| bad(cmd, "a part needs a refdes"))?;
+    let (x, y) = placement(cmd, obj)?;
+    Ok(EcadComponent { refdes: ecad_name(cmd, refdes, "refdes", false)?, pins: read_pins(cmd, obj)?, x, y })
+}
+
+fn read_pins(cmd: &str, obj: &serde_json::Map<String, Value>) -> Result<Vec<String>> {
+    let Some(value) = obj.get("pins") else { return Ok(Vec::new()) };
+    let items = value.as_array().ok_or_else(|| bad(cmd, "`pins` must be a list of names"))?;
+    if items.len() > MAX_ECAD_PINS {
+        return Err(bad(cmd, "too many pins"));
+    }
+    let mut pins = Vec::with_capacity(items.len());
+    for item in items {
+        let pin = item.as_str().ok_or_else(|| bad(cmd, "`pins` must be a list of names"))?;
+        let pin = ecad_name(cmd, pin, "pin", false)?;
+        if pins.iter().any(|have: &String| have.eq_ignore_ascii_case(&pin)) {
+            return Err(bad(cmd, "a pin name is repeated"));
+        }
+        pins.push(pin);
+    }
+    Ok(pins)
+}
+
+fn placement(cmd: &str, obj: &serde_json::Map<String, Value>) -> Result<(Option<f64>, Option<f64>)> {
+    match (obj.get("x"), obj.get("y")) {
+        (None, None) => Ok((None, None)),
+        (Some(x), Some(y)) => {
+            let x = x.as_f64().ok_or_else(|| bad(cmd, "`x` must be a number"))?;
+            let y = y.as_f64().ok_or_else(|| bad(cmd, "`y` must be a number"))?;
+            Ok((Some(board_mm(cmd, x, "x")?), Some(board_mm(cmd, y, "y")?)))
+        }
+        _ => Err(bad(cmd, "`x` and `y` are placed together")),
+    }
+}
+
+fn read_nets(cmd: &str, p: &Value) -> Result<Vec<EcadNet>> {
+    let Some(value) = p.get("nets") else { return Ok(Vec::new()) };
+    let items = value.as_array().ok_or_else(|| bad(cmd, "`nets` must be a list"))?;
+    if items.len() > MAX_ECAD_NETS {
+        return Err(bad(cmd, "too many nets"));
+    }
+    let mut nets = Vec::with_capacity(items.len());
+    for item in items {
+        let obj = item.as_object().ok_or_else(|| bad(cmd, "`nets` must be a list of {name, nodes}"))?;
+        let name = obj.get("name").and_then(Value::as_str).ok_or_else(|| bad(cmd, "a net needs a name"))?;
+        let name = ecad_name(cmd, name, "name", true)?;
+        if nets.iter().any(|net: &EcadNet| net.name.eq_ignore_ascii_case(&name)) {
+            return Err(bad(cmd, "a net name is repeated"));
+        }
+        let nodes = read_nodes(cmd, obj)?;
+        nets.push(EcadNet { name, nodes });
+    }
+    Ok(nets)
+}
+
+fn read_nodes(cmd: &str, obj: &serde_json::Map<String, Value>) -> Result<Vec<String>> {
+    let items = obj.get("nodes").and_then(Value::as_array).ok_or_else(|| bad(cmd, "a net needs nodes"))?;
+    if items.is_empty() || items.len() > MAX_ECAD_PINS {
+        return Err(bad(cmd, "a net needs 1…64 nodes"));
+    }
+    let mut nodes = Vec::with_capacity(items.len());
+    for item in items {
+        let node = item.as_str().ok_or_else(|| bad(cmd, "a net node must be a name"))?;
+        let node = ecad_name(cmd, node, "node", true)?;
+        if nodes.iter().any(|have: &String| have.eq_ignore_ascii_case(&node)) {
+            return Err(bad(cmd, "a net lists the same node twice"));
+        }
+        nodes.push(node);
+    }
+    Ok(nodes)
+}
+
+fn expand_nets(cmd: &str, nets: &[EcadNet]) -> Result<Vec<(String, String)>> {
+    let mut wires = Vec::new();
+    for net in nets {
+        let Some(first) = net.nodes.first() else { continue };
+        for other in net.nodes.iter().skip(1) {
+            if wires.len() >= MAX_ECAD_WIRES {
+                return Err(bad(cmd, "too many wires"));
+            }
+            wires.push((first.clone(), other.clone()));
+        }
+    }
+    Ok(wires)
+}
+
+fn preserved_layout(s: &Session) -> (f64, f64, Vec<[f64; 5]>) {
+    if let Some(board) = &s.doc.board {
+        return (board.width, board.height, board.traces.iter().map(trace_array).collect());
+    }
+    match &s.doc.schematic {
+        Some(schematic) => (schematic.board_width, schematic.board_height, schematic.traces.clone()),
+        None => (0.0, 0.0, Vec::new()),
+    }
+}
+
+fn store_nets(cmd: &str, schematic: &mut Schematic) -> Result<()> {
+    schematic.nets = classify_nets(cmd, &schematic.wires, &schematic.nets)?;
+    Ok(())
+}
+
+fn classify_nets(cmd: &str, wires: &[(String, String)], preferred: &[EcadNet]) -> Result<Vec<EcadNet>> {
+    let mut names = Vec::new();
+    let mut parent = Vec::new();
+    for (a, b) in wires.iter().take(MAX_ECAD_WIRES) {
+        let left = intern(cmd, &mut names, &mut parent, a)?;
+        let right = intern(cmd, &mut names, &mut parent, b)?;
+        unite(&mut parent, left, right);
+    }
+    let mut order = Vec::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for index in 0..names.len() {
+        let root = find(&mut parent, index);
+        if let Some(place) = order.iter().position(|have| *have == root) {
+            if let Some(group) = groups.get_mut(place) {
+                group.push(index);
+            }
+        } else {
+            order.push(root);
+            groups.push(vec![index]);
+        }
+    }
+    let mut nets = Vec::new();
+    for group in &groups {
+        let nodes = group.iter().filter_map(|index| names.get(*index).cloned()).collect::<Vec<_>>();
+        let name = choose_net_name(&nodes, preferred);
+        nets.push(EcadNet { name, nodes });
+    }
+    for pref in preferred.iter().take(MAX_ECAD_NETS) {
+        let Some(only) = pref.nodes.first() else { continue };
+        if pref.nodes.len() == 1 && !pref.name.is_empty() && !nets.iter().any(|net| net.nodes.iter().any(|node| node.eq_ignore_ascii_case(only))) {
+            nets.push(pref.clone());
+        }
+    }
+    Ok(nets)
+}
+
+fn choose_net_name(nodes: &[String], preferred: &[EcadNet]) -> String {
+    let mut best: Option<&EcadNet> = None;
+    for pref in preferred {
+        if pref.name.is_empty() || pref.nodes.is_empty() {
+            continue;
+        }
+        let inside = pref.nodes.iter().all(|node| nodes.iter().any(|have| have.eq_ignore_ascii_case(node)));
+        if !inside {
+            continue;
+        }
+        let replace = best
+            .is_none_or(|current| pref.nodes.len() > current.nodes.len() || (pref.nodes.len() == current.nodes.len() && pref.name < current.name));
+        if replace {
+            best = Some(pref);
+        }
+    }
+    if let Some(pref) = best {
+        return pref.name.clone();
+    }
+    if let Some(node) = nodes.iter().find(|node| net_class(node) == 1) {
+        return node.clone();
+    }
+    if let Some(node) = nodes.iter().find(|node| net_class(node) == 2) {
+        return node.clone();
+    }
+    nodes.first().cloned().unwrap_or_default()
 }
 
 fn net_class(name: &str) -> u8 {
@@ -2188,155 +2614,313 @@ fn net_class(name: &str) -> u8 {
     }
 }
 
-fn ecad_erc(s: &mut Session, _p: &Value) -> Result<Value> {
-    let before = s.doc.to_json();
-    let schematic = s.doc.schematic.clone();
-    let Some(schematic) = schematic else {
-        return Ok(json!({"shorts": 0, "unconnected": 0}));
-    };
-    let mut names: Vec<String> = Vec::new();
-    let mut parent: Vec<usize> = Vec::new();
-    let pin = |name: &str, names: &mut Vec<String>, parent: &mut Vec<usize>| -> usize {
-        if let Some(i) = names.iter().position(|n| n.eq_ignore_ascii_case(name)) {
-            return i;
-        }
-        names.push(name.to_string());
-        parent.push(parent.len());
-        parent.len() - 1
-    };
-    for (a, b) in schematic.wires.iter().take(10_000) {
-        let ia = pin(a, &mut names, &mut parent);
-        let ib = pin(b, &mut names, &mut parent);
-        let (mut ra, mut rb) = (ia, ib);
-        for _ in 0..10_000 {
-            if parent.get(ra).copied().unwrap_or(ra) == ra {
-                break;
+fn erc_report(cmd: &str, schematic: &Schematic) -> Result<Value> {
+    if schematic.wires.len() > MAX_ECAD_WIRES
+        || schematic.parts.len() > MAX_ECAD_PARTS
+        || schematic.components.len() > MAX_ECAD_PARTS
+        || schematic.nets.len() > MAX_ECAD_NETS
+    {
+        return Err(bad(cmd, "the schematic is too large"));
+    }
+    let (names, mut parent) = connect(cmd, schematic)?;
+    let shorts = short_count(&names, &mut parent);
+    let parts = erc_parts(schematic);
+    let unconnected = parts.iter().filter(|part| part_unconnected(part, &names)).count();
+    let open_pins = open_pin_count(&parts, &names);
+    Ok(json!({"shorts": shorts, "unconnected": unconnected, "open_pins": open_pins, "nets": schematic.nets.len()}))
+}
+
+fn erc_parts(schematic: &Schematic) -> Vec<EcadComponent> {
+    if !schematic.components.is_empty() {
+        return schematic.components.clone();
+    }
+    schematic.parts.iter().take(MAX_ECAD_PARTS).map(|refdes| EcadComponent { refdes: refdes.clone(), ..EcadComponent::default() }).collect()
+}
+
+fn part_unconnected(part: &EcadComponent, names: &[String]) -> bool {
+    let named = names.iter().any(|name| name.eq_ignore_ascii_case(&part.refdes));
+    if part.pins.is_empty() {
+        return !named;
+    }
+    let pin = part.pins.iter().any(|pin| names.iter().any(|name| name.eq_ignore_ascii_case(&format!("{}.{}", part.refdes, pin))));
+    !named && !pin
+}
+
+fn open_pin_count(parts: &[EcadComponent], names: &[String]) -> usize {
+    let mut count = 0;
+    for part in parts.iter().take(MAX_ECAD_PARTS) {
+        for pin in part.pins.iter().take(MAX_ECAD_PINS) {
+            let node = format!("{}.{}", part.refdes, pin);
+            if !names.iter().any(|name| name.eq_ignore_ascii_case(&node)) {
+                count += 1;
             }
-            ra = parent[ra];
-        }
-        for _ in 0..10_000 {
-            if parent.get(rb).copied().unwrap_or(rb) == rb {
-                break;
-            }
-            rb = parent[rb];
-        }
-        if ra != rb
-            && let Some(slot) = parent.get_mut(ra)
-        {
-            *slot = rb;
         }
     }
-    let mut power = vec![false; parent.len()];
-    let mut ground = vec![false; parent.len()];
-    for (i, name) in names.iter().enumerate() {
-        let mut r = i;
-        for _ in 0..10_000 {
-            if parent.get(r).copied().unwrap_or(r) == r {
-                break;
-            }
-            r = parent[r];
+    count
+}
+
+fn connect(cmd: &str, schematic: &Schematic) -> Result<(Vec<String>, Vec<usize>)> {
+    let mut names = Vec::new();
+    let mut parent = Vec::new();
+    for (a, b) in schematic.wires.iter().take(MAX_ECAD_WIRES) {
+        let left = intern(cmd, &mut names, &mut parent, a)?;
+        let right = intern(cmd, &mut names, &mut parent, b)?;
+        unite(&mut parent, left, right);
+    }
+    for net in schematic.nets.iter().take(MAX_ECAD_NETS) {
+        let Some(first) = net.nodes.first() else { continue };
+        let head = intern(cmd, &mut names, &mut parent, first)?;
+        for other in net.nodes.iter().skip(1).take(MAX_ECAD_PINS) {
+            let node = intern(cmd, &mut names, &mut parent, other)?;
+            unite(&mut parent, head, node);
         }
+    }
+    Ok((names, parent))
+}
+
+fn intern(cmd: &str, names: &mut Vec<String>, parent: &mut Vec<usize>, name: &str) -> Result<usize> {
+    if let Some(index) = names.iter().position(|have| have.eq_ignore_ascii_case(name)) {
+        return Ok(index);
+    }
+    if names.len() >= MAX_ECAD_NODES {
+        return Err(bad(cmd, "the schematic is too large"));
+    }
+    names.push(name.to_string());
+    parent.push(parent.len());
+    Ok(parent.len() - 1)
+}
+
+fn find(parent: &mut [usize], start: usize) -> usize {
+    let mut root = start;
+    for _ in 0..MAX_ECAD_NODES {
+        let Some(&next) = parent.get(root) else { return root };
+        if next == root {
+            break;
+        }
+        root = next;
+    }
+    let mut node = start;
+    for _ in 0..MAX_ECAD_NODES {
+        let Some(&next) = parent.get(node) else { break };
+        if let Some(slot) = parent.get_mut(node) {
+            *slot = root;
+        }
+        if next == node || next == root {
+            break;
+        }
+        node = next;
+    }
+    root
+}
+
+fn unite(parent: &mut [usize], a: usize, b: usize) {
+    let left = find(parent, a);
+    let right = find(parent, b);
+    if left != right
+        && let Some(slot) = parent.get_mut(left)
+    {
+        *slot = right;
+    }
+}
+
+fn short_count(names: &[String], parent: &mut [usize]) -> usize {
+    let mut power = vec![false; names.len()];
+    let mut ground = vec![false; names.len()];
+    for (index, name) in names.iter().enumerate() {
+        let root = find(parent, index);
         match net_class(name) {
             1 => {
-                if let Some(flag) = power.get_mut(r) {
+                if let Some(flag) = power.get_mut(root) {
                     *flag = true;
                 }
             }
             2 => {
-                if let Some(flag) = ground.get_mut(r) {
+                if let Some(flag) = ground.get_mut(root) {
                     *flag = true;
                 }
             }
             _ => {}
         }
     }
-    let shorts = (0..parent.len())
-        .filter(|i| parent.get(*i).copied() == Some(*i) && power.get(*i).copied() == Some(true) && ground.get(*i).copied() == Some(true))
-        .count();
-    let unconnected = schematic.parts.iter().filter(|part| !names.iter().any(|n| n.eq_ignore_ascii_case(part))).count();
-    if s.doc.to_json() != before {
-        return Err(bad("ecad.erc", "the check edited the schematic"));
+    let mut shorts = 0;
+    for index in 0..names.len() {
+        if find(parent, index) == index && power.get(index).copied() == Some(true) && ground.get(index).copied() == Some(true) {
+            shorts += 1;
+        }
     }
-    Ok(json!({"shorts": shorts, "unconnected": unconnected}))
+    shorts
 }
 
-fn ensure_schematic(s: &mut Session) -> &mut Schematic {
-    s.doc_mut().schematic.get_or_insert(Schematic { parts: Vec::new(), wires: Vec::new(), board_width: 0.0, board_height: 0.0, traces: Vec::new() })
+fn copper(s: &Session) -> Vec<EcadTrace> {
+    if let Some(board) = &s.doc.board {
+        return board.traces.clone();
+    }
+    let Some(schematic) = &s.doc.schematic else { return Vec::new() };
+    schematic.traces.iter().copied().map(trace_from_array).collect()
 }
 
-fn ecad_board(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "ecad.board";
-    let width = finite(cmd, p.get("width").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`width` is required"))?, "width")?;
-    let height = finite(cmd, p.get("height").and_then(Value::as_f64).ok_or_else(|| bad(cmd, "`height` is required"))?, "height")?;
-    if width <= 0.0 || height <= 0.0 {
-        return Err(bad(cmd, "the board size must be positive"));
-    }
-    let board = ensure_schematic(s);
-    board.board_width = width;
-    board.board_height = height;
-    Ok(json!({"width": width, "height": height}))
+fn trace_from_array(trace: [f64; 5]) -> EcadTrace {
+    EcadTrace { x0: trace[0], y0: trace[1], x1: trace[2], y1: trace[3], width: trace[4], net: String::new() }
 }
 
-fn ecad_trace(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "ecad.trace";
-    let mut trace = [0.0; 5];
-    for (i, key) in ["x0", "y0", "x1", "y1", "width"].into_iter().enumerate() {
-        trace[i] = finite(cmd, p.get(key).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("`{key}` is required")))?, key)?;
-    }
-    if trace[4] <= 0.0 {
-        return Err(bad(cmd, "trace width must be positive"));
-    }
-    let schematic = ensure_schematic(s);
-    schematic.traces.push(trace);
-    Ok(json!({"traces": schematic.traces.len()}))
+fn trace_array(trace: &EcadTrace) -> [f64; 5] {
+    [trace.x0, trace.y0, trace.x1, trace.y1, trace.width]
 }
 
-fn ecad_drc(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "ecad.drc";
-    let clearance = p.get("clearance").and_then(Value::as_f64).unwrap_or(0.2);
-    let clearance = finite(cmd, clearance, "clearance")?;
-    let before = s.doc.to_json();
-    let traces = s.doc.schematic.as_ref().map(|s| s.traces.clone()).unwrap_or_default();
-    let mut violations = 0;
-    for (i, a) in traces.iter().enumerate() {
-        for b in traces.iter().skip(i + 1) {
-            let gap = ((a[0] - b[0]).hypot(a[1] - b[1])).min((a[2] - b[2]).hypot(a[3] - b[3]));
-            if gap < clearance + (a[4] + b[4]) * 0.5 {
-                violations += 1;
+fn trace_ok(trace: &EcadTrace) -> bool {
+    [trace.x0, trace.y0, trace.x1, trace.y1, trace.width].iter().all(|value| value.is_finite() && value.abs() < 10_000.0)
+        && trace.width > 0.0
+        && trace.width < 100.0
+}
+
+fn set_layout(s: &mut Session, width: f64, height: f64, traces: Vec<EcadTrace>) {
+    s.doc_mut().board = Some(Board { width, height, traces });
+    mirror_layout(s);
+}
+
+fn mirror_layout(s: &mut Session) {
+    let Some(board) = s.doc.board.clone() else { return };
+    let schematic = s.doc_mut().schematic.get_or_insert_with(Schematic::default);
+    schematic.board_width = board.width;
+    schematic.board_height = board.height;
+    schematic.traces = board.traces.iter().map(trace_array).collect();
+}
+
+fn board_size(s: &Session) -> Option<(f64, f64)> {
+    if let Some(board) = &s.doc.board
+        && board.width > 0.0
+        && board.height > 0.0
+    {
+        return Some((board.width, board.height));
+    }
+    let schematic = s.doc.schematic.as_ref()?;
+    (schematic.board_width > 0.0 && schematic.board_height > 0.0).then_some((schematic.board_width, schematic.board_height))
+}
+
+fn count_drc(traces: &[EcadTrace], clearance: f64, min_width: f64) -> Result<(usize, usize)> {
+    if traces.len() > MAX_ECAD_TRACES {
+        return Err(bad("ecad.drc", "too many traces"));
+    }
+    if traces.iter().any(|trace| !trace_ok(trace)) {
+        return Err(bad("ecad.drc", "a trace is not usable"));
+    }
+    let mut clearance_hits = 0;
+    let mut width_hits = 0;
+    for (index, left) in traces.iter().enumerate() {
+        if left.width + 1e-9 < min_width {
+            width_hits += 1;
+        }
+        for right in traces.iter().skip(index + 1) {
+            if same_net(left, right) {
+                continue;
+            }
+            if edge_gap(left, right) + 1e-9 < clearance {
+                clearance_hits += 1;
             }
         }
     }
-    if s.doc.to_json() != before {
-        return Err(bad(cmd, "the check moved the copper"));
+    Ok((clearance_hits, width_hits))
+}
+
+fn same_net(left: &EcadTrace, right: &EcadTrace) -> bool {
+    !left.net.is_empty() && left.net.eq_ignore_ascii_case(&right.net)
+}
+
+fn edge_gap(left: &EcadTrace, right: &EcadTrace) -> f64 {
+    let distance = segment_distance([left.x0, left.y0], [left.x1, left.y1], [right.x0, right.y0], [right.x1, right.y1]);
+    distance - (left.width + right.width) * 0.5
+}
+
+fn segment_distance(a0: [f64; 2], a1: [f64; 2], b0: [f64; 2], b1: [f64; 2]) -> f64 {
+    if segments_touch(a0, a1, b0, b1) {
+        return 0.0;
     }
-    Ok(json!({"violations": violations}))
+    point_segment_distance(a0[0], a0[1], b0[0], b0[1], b1[0], b1[1])
+        .min(point_segment_distance(a1[0], a1[1], b0[0], b0[1], b1[0], b1[1]))
+        .min(point_segment_distance(b0[0], b0[1], a0[0], a0[1], a1[0], a1[1]))
+        .min(point_segment_distance(b1[0], b1[1], a0[0], a0[1], a1[0], a1[1]))
 }
 
-fn ecad_push(s: &mut Session, _p: &Value) -> Result<Value> {
+fn point_segment_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 < 1e-18 { 0.0 } else { ((px - ax) * dx + (py - ay) * dy) / len2 };
+    let t = t.clamp(0.0, 1.0);
+    (px - (ax + t * dx)).hypot(py - (ay + t * dy))
+}
+
+fn segments_touch(a0: [f64; 2], a1: [f64; 2], b0: [f64; 2], b1: [f64; 2]) -> bool {
+    let o1 = orient(a0[0], a0[1], a1[0], a1[1], b0[0], b0[1]);
+    let o2 = orient(a0[0], a0[1], a1[0], a1[1], b1[0], b1[1]);
+    let o3 = orient(b0[0], b0[1], b1[0], b1[1], a0[0], a0[1]);
+    let o4 = orient(b0[0], b0[1], b1[0], b1[1], a1[0], a1[1]);
+    if o1 * o2 < 0.0 && o3 * o4 < 0.0 {
+        return true;
+    }
+    let eps = 1e-9;
+    (o1.abs() <= eps && near_segment(a0, a1, b0))
+        || (o2.abs() <= eps && near_segment(a0, a1, b1))
+        || (o3.abs() <= eps && near_segment(b0, b1, a0))
+        || (o4.abs() <= eps && near_segment(b0, b1, a1))
+}
+
+fn orient(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64 {
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+fn near_segment(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> bool {
+    let eps = 1e-9;
+    p[0] >= a[0].min(b[0]) - eps && p[0] <= a[0].max(b[0]) + eps && p[1] >= a[1].min(b[1]) - eps && p[1] <= a[1].max(b[1]) + eps
+}
+
+fn pcb_exists(s: &Session) -> bool {
+    s.model.state().body("PCB").is_some()
+}
+
+fn pcb_volume(s: &Session) -> Option<f64> {
+    let state = s.model.state();
+    let body = state.body("PCB")?;
+    solidcraft_kernel::measure(&body.body).ok().map(|measured| measured.volume)
+}
+
+fn pcb_owner(s: &Session) -> Option<u64> {
+    let state = s.model.state();
+    let body = state.body("PCB")?;
+    Some(s.doc.model_body_component(body))
+}
+
+fn existing_board(width: f64, height: f64, thickness: f64, volume: Option<f64>) -> Result<Value> {
     let cmd = "ecad.push_3d";
-    let (width, height) = s
-        .doc
-        .schematic
-        .as_ref()
-        .map(|s| (s.board_width, s.board_height))
-        .filter(|(w, h)| *w > 0.0 && *h > 0.0)
-        .ok_or_else(|| bad(cmd, "create a board first"))?;
-    s.execute("component.create", &json!({"name": "PCB"}))?;
-    s.execute("solid.box", &json!({"length": width, "width": height, "height": 1.6, "body_name": "PCB"}))?;
-    Ok(json!({"body": "PCB", "component": "PCB"}))
+    let Some(volume) = volume else {
+        return Err(bad(cmd, "not supported yet: updating a pushed board"));
+    };
+    let want = width * height * thickness;
+    if (volume - want).abs() <= 1e-3 * want.max(1.0) {
+        return Ok(json!({"body": "PCB", "component": "PCB", "unchanged": true, "thickness": thickness}));
+    }
+    Err(bad(cmd, "not supported yet: updating a pushed board"))
 }
 
-fn ecad_export(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "ecad.export";
-    let path = str_(p, "path").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`path` is required"))?;
-    let (width, height) = s.doc.schematic.as_ref().map(|s| (s.board_width, s.board_height)).unwrap_or((10.0, 10.0));
-    let x = (width * 10000.0).round() as i64;
-    let y = (height * 10000.0).round() as i64;
-    let text = format!("%FSLAX46Y46*%\n%MOMM*%\nG01*\nX0Y0D02*\nX{x}Y{y}D01*\nM02*\n");
-    std::fs::write(path, text).map_err(|e| bad(cmd, e.to_string()))?;
-    Ok(json!({"path": path}))
+fn place_board(s: &mut Session, width: f64, height: f64, thickness: f64) -> Result<Value> {
+    let cmd = "ecad.push_3d";
+    let created = s.execute("component.create", &json!({"name": "PCB"}))?;
+    let component = created.get("component").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "the PCB component was not created"))?;
+    let occurrence = created.get("occurrence").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "the PCB component has no occurrence"))?;
+    s.execute("solid.box", &json!({"length": width, "width": height, "height": thickness, "body_name": "PCB", "operation": "new"}))?;
+    let owner = pcb_owner(s).ok_or_else(|| bad(cmd, "the PCB body was not created"))?;
+    if owner != component {
+        return Err(bad(cmd, "the PCB body is not in its component"));
+    }
+    Ok(json!({
+        "body": "PCB",
+        "component": "PCB",
+        "component_id": component,
+        "occurrence": occurrence,
+        "width": width,
+        "height": height,
+        "thickness": thickness,
+    }))
 }
-
 fn drawing_dxf(s: &mut Session, p: &Value) -> Result<Value> {
     super::drawing::export_dxf(s, p)
 }
@@ -2609,6 +3193,10 @@ fn gen_promote(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 #[path = "sim_tests.rs"]
 mod sim_tests;
+
+#[cfg(test)]
+#[path = "ecad_tests.rs"]
+mod ecad_tests;
 
 #[cfg(test)]
 #[path = "present_tests.rs"]

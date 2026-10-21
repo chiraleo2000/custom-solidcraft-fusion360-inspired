@@ -2377,18 +2377,69 @@ pub struct RenderScene {
     pub focal: f64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A schematic part. Names and pins are the caller's; SolidCraft has no vendor part library.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EcadComponent {
+    pub refdes: String,
+    /// Pin names. A pin is connected when a wire or net names `{refdes}.{pin}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<String>,
+    /// Placement on the board, millimetres. Absent until the part is placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+}
+
+/// One electrical net. `nodes` are pin names (`U1.1`) or net names (`vcc`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EcadNet {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<String>,
+}
+
+/// One copper segment, millimetres. `net` is empty when the segment was drawn without one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EcadTrace {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    pub width: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub net: String,
+}
+
+/// PCB outline and copper. Checks read it and do not move it.
+/// PCB autorouting is not stored here; copper is only what was placed by hand.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Board {
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub traces: Vec<EcadTrace>,
+}
+
+/// Components, wires and the nets those wires form.
+/// `parts` and `wires` are the names; `components` and `nets` are the same data in structured
+/// form. Designs saved before those fields existed still load.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Schematic {
     pub parts: Vec<String>,
     pub wires: Vec<(String, String)>,
-    /// Board size in millimetres. Zero means no board yet.
+    /// Board size in millimetres. Zero means no board yet. Mirrored from [`Board`] when a layout exists.
     #[serde(default)]
     pub board_width: f64,
     #[serde(default)]
     pub board_height: f64,
-    /// Copper segments in board coordinates: x0, y0, x1, y1, width.
+    /// Copper segments in board coordinates: x0, y0, x1, y1, width. Mirrored from [`Board`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traces: Vec<[f64; 5]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<EcadComponent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nets: Vec<EcadNet>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2500,6 +2551,10 @@ pub struct Document {
     pub render_scene: Option<RenderScene>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schematic: Option<Schematic>,
+    /// PCB layout. Omitted on designs saved before the board was stored on its own;
+    /// those files keep the outline on [`Schematic`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<Board>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generative: Vec<GenerativeStudy>,
     /// Comments of feature-input parameters (by name).
@@ -2603,6 +2658,7 @@ impl Document {
             stories: Vec::new(),
             render_scene: None,
             schematic: None,
+            board: None,
             generative: Vec::new(),
         }
     }

@@ -39,7 +39,8 @@ In scope, in priority order:
 Local commands now cover machining setups, 2D and 3D toolpaths, turning, probing, nesting,
 a static beam study, a generative candidate, a storyboard that reuses exploded views and
 motion studies, interpolates a preview, and publishes an image sequence without moving
-placements, schematic checks with a public Gerber export, and drawing views, parts lists,
+placements, schematic components and nets, read-only ERC and DRC, a public Gerber
+RS-274X subset, a 3D board component, and drawing views, parts lists,
 and DXF/PDF export. Open surface extrudes, sheet-metal rips and lofted flanges are in the
 document. Appearance metalness and roughness shade `render.image` and CPU snapshots.
 Still deferred: PCB autorouting, a cloud renderer, and animation video files.
