@@ -257,8 +257,9 @@ jobs:
     needs: version
     if: needs.version.outputs.build == 'true'
     # GitHub has no FreeBSD runners: build in a FreeBSD 14.3 VM.
-    # Pin Ubuntu 24.04: nested KVM on ubuntu-latest has been offering only 2 vCPUs, and a
-    # 12 GiB guest fails to allocate after the ~4.5 GiB qcow2 extract ("Cannot allocate memory").
+    # Pin Ubuntu 24.04. Nested KVM recommends 2 vCPUs, and a 12 GiB guest fails with
+    # "Cannot allocate memory" after the qcow2 extract. Do not add a swap file: the runner
+    # disk fills (/swapfile is already in use, and an extra 6 GiB file hits "No space left").
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -266,25 +267,6 @@ jobs:
       SOLIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Add swap for the nested FreeBSD VM
-        run: |
-          # Host RAM is shared with the extracted image. GitHub images already activate /swapfile
-          # ("Text file busy"), so never recreate that path. Skip when 4 GiB is already on.
-          set -euo pipefail
-          have_kb=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
-          if [ "${have_kb:-0}" -ge 4194304 ]; then
-            echo "host already has ${have_kb} kB swap"
-            free -h
-            exit 0
-          fi
-          path=/mnt/solidcraft-vm.swap
-          if ! swapon --show=NAME | grep -qx "$path"; then
-            sudo fallocate -l 6G "$path" || sudo dd if=/dev/zero of="$path" bs=1M count=6144 status=none
-            sudo chmod 600 "$path"
-            sudo mkswap "$path"
-            sudo swapon "$path"
-          fi
-          free -h
       - name: Build and package in a FreeBSD VM (tar.gz)
         # vmactions/freebsd-vm v1.5.9, pinned by commit (it runs our build).
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc
