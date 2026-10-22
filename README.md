@@ -1,16 +1,49 @@
-# SolidCraft
+# Custom SolidCraft
 
-**An open-source parametric 3D CAD application built in pure Rust.**
+**A separate fork of SolidCraft, the open-source parametric 3D CAD application written in pure Rust.**
 
-Sketch, constrain, and build solids with a parametric feature timeline. Change a dimension
-and watch your model rebuild. Run it on your desktop, in your browser, or let AI agents
-model through the built-in MCP server.
+This repository is not the upstream project. The original SolidCraft is
+[bherbruck/solidcraft](https://github.com/bherbruck/solidcraft). Its installers, public book,
+Snap Store listing and issue tracker belong to that project. Bugs in this fork do not
+belong there.
 
-![SolidCraft 0.6: model a Raspberry Pi 4 case from an empty design: a sketch dimensioned with parameters, extrude, fillets and shell, standoffs patterned on the board's mounting holes, port cut-outs, vent slots, a colour and a height change in Parameters](docs/screenshots/demo-0.6.gif)
+This fork is
+[chiraleo2000/custom-solidcraft-fusion360-inspired](https://github.com/chiraleo2000/custom-solidcraft-fusion360-inspired),
+branch `dev`. The program, crates and `.solidcraft` files are still named SolidCraft.
+Work here extends the modelling shell toward familiar parametric CAD interaction
+(sketches, a timeline, assemblies and related workspaces) from general CAD conventions.
+It does not copy another product's interface, icons or command names, and it is not
+affiliated with Autodesk.
 
-*A Raspberry Pi 4 case from an empty design: a sketch dimensioned with the board's parameters, extrude, fillet, shell, an M2.5 standoff patterned on the 58 × 49 mm hole rectangle, port cut-outs, vent slots and a colour, then height 24 → 32 mm in Parameters and it all rebuilds. 6× playback. [Full video](https://github.com/bherbruck/solidcraft/raw/refs/heads/main/docs/screenshots/demo-0.6.mp4), recorded with the [demo script](examples/demo/record_ui.sh).*
+Sketch, constrain and build solids with a parametric feature timeline. Change a dimension
+and the model rebuilds. Run the desktop app, the browser build, or drive it with the
+built-in MCP server.
 
-## Download
+![Upstream SolidCraft 0.6 demo: a Raspberry Pi 4 case modelled from an empty design](docs/screenshots/demo-0.6.gif)
+
+*The picture above is the upstream 0.6 demo (a Raspberry Pi 4 case), kept so the modelling
+flow is visible. The [full video](https://github.com/bherbruck/solidcraft/raw/refs/heads/main/docs/screenshots/demo-0.6.mp4)
+is on the original repository. The [demo script](examples/demo/record_ui.sh) is in this tree.*
+
+## Run this fork
+
+Build it yourself. There is no store listing for Custom SolidCraft.
+
+```sh
+cargo run --release -p solidcraft -- --sample
+```
+
+On Windows, from this checkout: `cargo build --release -p solidcraft`, then
+`target\release\solidcraft.exe`. More commands are under [Build and run](#build-and-run).
+
+Questions and bugs for **this** tree:
+[issues on this fork](https://github.com/chiraleo2000/custom-solidcraft-fusion360-inspired/issues).
+How to build and test: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Upstream project
+
+The installers and the hosted book below are published by the **original** SolidCraft,
+not by this fork. Use them only if you want that project.
 
 [![Download for Windows][badge-windows]][windows-msi]
 [![Download for macOS][badge-macos]][macos-dmg]
@@ -28,14 +61,14 @@ model through the built-in MCP server.
   openSUSE), or use [Flatpak](https://bherbruck.github.io/solidcraft/guide/getting-started.html#linux-flatpak).
   With Snap: `sudo snap install solidcraft` ([Snap Store][snap-store], or the [.snap file][linux-snap]).
   For ARM64: [AppImage][linux-arm64-appimage], [.deb][linux-arm64-deb], [.rpm][linux-arm64-rpm].
-- **Web:** [try it in your browser][web-app], no install.
+- **Web:** the [upstream browser build][web-app].
 
-The downloads aren't signed yet. On Windows, if SmartScreen warns you, choose **More info**, then
-**Run anyway**. On macOS, the first time, right-click SolidCraft in Applications and choose **Open**.
+Those upstream files are not signed. On Windows, if SmartScreen warns you, choose **More info**, then
+**Run anyway**. On macOS, the first time, right-click the app in Applications and choose **Open**.
 
-Older versions, checksums and other formats are on the [releases page](https://github.com/bherbruck/solidcraft/releases).
-Install details, upgrading from earlier builds and building from source are in
-[Getting started](https://bherbruck.github.io/solidcraft/guide/getting-started.html).
+Older upstream versions and checksums are on the
+[upstream releases page](https://github.com/bherbruck/solidcraft/releases).
+Upstream install notes: [Getting started](https://bherbruck.github.io/solidcraft/guide/getting-started.html).
 
 [badge-windows]: https://img.shields.io/badge/Windows-Download-0078D6?style=for-the-badge&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0yIDJoOS41djkuNUgyek0xMi41IDJIMjJ2OS41aC05LjV6TTIgMTIuNWg5LjVWMjJIMnpNMTIuNSAxMi41SDIyVjIyaC05LjV6Ii8%2BPC9zdmc%2B
 [badge-macos]: https://img.shields.io/badge/macOS-Download-333333?style=for-the-badge&logo=apple&logoColor=white
@@ -57,16 +90,17 @@ Install details, upgrading from earlier builds and building from source are in
 [snap-store]: https://snapcraft.io/solidcraft
 [web-app]: https://bherbruck.github.io/solidcraft/app/
 
-**Documentation:** the [SolidCraft book](https://bherbruck.github.io/solidcraft/) (user guide,
-developer guide and command reference; sources in [docs/book](docs/book)).
+**Upstream documentation:** the [SolidCraft book](https://bherbruck.github.io/solidcraft/)
+(user guide, developer guide and command reference). The same sources are in [docs/book](docs/book)
+in this tree, but the hosted site is the original project's.
 
-**Status: early but usable for simple parts.** 75 of 76 public reference parts
-match their analytic or FreeCAD-computed volume, area, centre of mass and bounding box
+**Shared modelling status.** 75 of 76 public reference parts match their analytic or
+FreeCAD-computed volume, area, centre of mass and bounding box
 ([docs/oracle.md](docs/oracle.md)); the other is a tracked bug.
-These checks do not establish complete geometric or workflow equivalence. The commands SolidCraft has
-are listed by area in [docs/features.md](docs/features.md); status and plans are in [ROADMAP.md](ROADMAP.md).
-Open work and known bugs are in [GitHub issues](https://github.com/bherbruck/solidcraft/issues),
-and help is welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+These checks do not establish complete geometric or workflow equivalence, and they do not
+make this fork an upstream release. Commands are listed in [docs/features.md](docs/features.md);
+plans for this tree are in [ROADMAP.md](ROADMAP.md).
+Upstream issues stay on [the original tracker](https://github.com/bherbruck/solidcraft/issues).
 
 ## What works
 
@@ -220,7 +254,9 @@ MIT OR Apache-2.0, at your option. Developed under the
 [clean-room contribution rules](CLAUDE.md); third-party code and assets retain their
 documented licences and attribution.
 
-SolidCraft is independent. Behaviour is designed from public documentation, general CAD
-conventions and user feedback. Reference tests use analytic values and open-source tools.
-SolidCraft is not affiliated with, sponsored by or endorsed by Autodesk. Autodesk and
-Fusion are trademarks of Autodesk, Inc.
+SolidCraft is independent of commercial CAD products. Behaviour is designed from public
+documentation, general CAD conventions and user feedback. Reference tests use analytic
+values and open-source tools. This fork is also independent of the upstream maintainers:
+it is not an official SolidCraft release. Neither this fork nor SolidCraft is affiliated
+with, sponsored by or endorsed by Autodesk. Autodesk and Fusion are trademarks of
+Autodesk, Inc.
