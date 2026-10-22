@@ -19,11 +19,14 @@ Sketch, constrain and build solids with a parametric feature timeline. Change a 
 and the model rebuilds. Run the desktop app, the browser build, or drive it with the
 built-in MCP server.
 
-![Upstream SolidCraft 0.6 demo: a Raspberry Pi 4 case modelled from an empty design](docs/screenshots/demo-0.6.gif)
+![Custom SolidCraft workspace tour: sketch, solids, surfaces, sheet metal, form, mold, machining, simulation, drawings and a board](docs/screenshots/feature-tour.gif)
 
-*The picture above is the upstream 0.6 demo (a Raspberry Pi 4 case), kept so the modelling
-flow is visible. The [full video](https://github.com/bherbruck/solidcraft/raw/refs/heads/main/docs/screenshots/demo-0.6.mp4)
-is on the original repository. The [demo script](examples/demo/record_ui.sh) is in this tree.*
+*This fork, recorded in the desktop app after `feature_tour_scenes_cover_the_workspaces` passed.
+Fourteen scenes, three seconds each: sketch and parameters, holes and mirror, fillet, shell,
+revolve, pattern, surface, sheet metal, form, a box, mold, machining, a beam study, a drawing,
+then a component and a board. [Video](docs/screenshots/feature-tour.mp4).
+The same steps are [examples/demo/feature_tour.json](examples/demo/feature_tour.json).
+That is the workspace tour, not a separate frame for every one of the 479 commands.*
 
 ## Run this fork
 

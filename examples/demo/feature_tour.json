@@ -1,0 +1,128 @@
+{
+  "scenes": [
+    {
+      "title": "Sketch, parameters, extrude, hole and mirror",
+      "commands": [
+        {"command": "parameters.add", "params": {"name": "len", "expression": "60 mm"}},
+        {"command": "sketch.create", "params": {"plane": "XY", "name": "Base"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [40, 30]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "solid.extrude", "params": {"sketch": "Base", "distance": 12, "operation": "new", "body_name": "Block"}},
+        {"command": "solid.hole", "params": {"position": [30, 8, 12], "diameter": 6, "name": "Hole"}},
+        {"command": "solid.mirror", "params": {"features": ["Hole"], "plane": {"origin": [20, 0, 0], "normal": [1, 0, 0]}, "name": "Twin"}},
+        {"command": "parameters.change", "params": {"name": "len", "expression": "80 mm"}},
+        {"command": "inspect.measure", "params": {}}
+      ]
+    },
+    {
+      "title": "Fillet and chamfer",
+      "commands": [
+        {"command": "solid.box", "params": {"length": 40, "width": 30, "height": 20, "body_name": "Case"}},
+        {"command": "solid.fillet", "params": {"edges": [[0, 0, 10]], "radius": 2, "body": "Case"}},
+        {"command": "solid.chamfer", "params": {"edges": [[40, 0, 10]], "distance": 1, "body": "Case"}}
+      ]
+    },
+    {
+      "title": "Shell",
+      "commands": [
+        {"command": "solid.box", "params": {"length": 40, "width": 30, "height": 20, "body_name": "Case"}},
+        {"command": "solid.shell", "params": {"faces": [[20, 15, 20]], "thickness": "2 mm", "body": "Case"}}
+      ]
+    },
+    {
+      "title": "Revolve",
+      "commands": [
+        {"command": "sketch.create", "params": {"plane": "XZ", "name": "Profile"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [8, 0], "p1": [14, 6]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "solid.revolve", "params": {"sketch": "Profile", "axis": "Z", "angle": "360 deg", "body_name": "Ring"}}
+      ]
+    },
+    {
+      "title": "Pattern and combine",
+      "commands": [
+        {"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "body_name": "A"}},
+        {"command": "solid.box", "params": {"length": 10, "width": 10, "height": 10, "corner": [16, 0, 0], "body_name": "B"}},
+        {"command": "solid.pattern.rectangular", "params": {"bodies": ["A"], "dir1": [0, 1, 0], "count1": 3, "spacing1": 14}},
+        {"command": "solid.combine", "params": {"target": "A", "tools": ["B"], "operation": "join"}}
+      ]
+    },
+    {
+      "title": "Surface patch",
+      "commands": [
+        {"command": "sketch.create", "params": {"plane": "XY", "name": "Pad"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [24, 16]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "surface.patch", "params": {"sketch": "Pad", "body_name": "Sheet"}}
+      ]
+    },
+    {
+      "title": "Sheet metal flange",
+      "commands": [
+        {"command": "sketch.create", "params": {"plane": "XY", "name": "Base"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [80, 50]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "sheet.flange", "params": {"sketch": "Base"}},
+        {"command": "sheet.flange", "params": {"edges": [[40, 50, 1]], "height": 18}}
+      ]
+    },
+    {
+      "title": "Form body",
+      "commands": [
+        {"command": "form.create", "params": {"shape": "box", "length": 36, "width": 22, "thickness": 4, "name": "Panel"}}
+      ]
+    },
+    {
+      "title": "Box primitive",
+      "commands": [
+        {"command": "solid.box", "params": {"length": 16, "width": 16, "height": 16, "body_name": "Stock"}}
+      ]
+    },
+    {
+      "title": "Mold box",
+      "commands": [
+        {"command": "solid.box", "params": {"length": 20, "width": 14, "height": 8, "body_name": "Part"}},
+        {"command": "mold.box", "params": {"body": "Part", "margin": "6", "body_name": "Mold"}}
+      ]
+    },
+    {
+      "title": "Machining contour",
+      "commands": [
+        {"command": "solid.box", "params": {"length": 40, "width": 24, "height": 10, "body_name": "Plate"}},
+        {"command": "sketch.create", "params": {"plane": "XY", "name": "Pad"}},
+        {"command": "sketch.rectangle.two_point", "params": {"p0": [4, 4], "p1": [28, 16]}},
+        {"command": "sketch.finish", "params": {}},
+        {"command": "cam.setup", "params": {"name": "Op1", "stock": [40, 24, 12], "bodies": ["Plate"]}},
+        {"command": "cam.contour", "params": {"sketch": "Pad", "tool_diameter": 2, "depth": 3, "name": "Outline"}}
+      ]
+    },
+    {
+      "title": "Static beam study",
+      "commands": [
+        {"command": "solid.box", "params": {"length": 100, "width": 10, "height": 10, "body_name": "Beam"}},
+        {"command": "sim.static", "params": {"name": "Bend", "body": "Beam", "force": 80, "modulus": 200000}}
+      ]
+    },
+    {
+      "title": "Drawing and appearance",
+      "commands": [
+        {"command": "solid.box", "params": {"length": 30, "width": 20, "height": 12, "body_name": "Block"}},
+        {"command": "appearance.assign", "params": {"bodies": ["Block"], "color": "#c4a574", "metalness": 0.6, "roughness": 0.35}},
+        {"command": "drawing.create", "params": {"name": "Sheet"}},
+        {"command": "view.standard.isometric", "params": {"camera": {"target": [15, 10, 6], "yaw": 0, "pitch": 0.6, "roll": 0, "distance": 120, "fov": 0.8}}}
+      ]
+    },
+    {
+      "title": "Component and circuit board",
+      "commands": [
+        {"command": "component.create", "params": {"name": "Lid"}},
+        {"command": "solid.box", "params": {"length": 18, "width": 12, "height": 6, "corner": [40, 0, 0], "body_name": "Lid"}},
+        {"command": "component.activate", "params": {"component": "root"}},
+        {"command": "ecad.schematic", "params": {"parts": ["U1"]}},
+        {"command": "ecad.board", "params": {"width": 36, "height": 22}},
+        {"command": "ecad.trace", "params": {"x0": 2, "y0": 4, "x1": 16, "y1": 4, "width": 0.3, "net": "vcc"}},
+        {"command": "ecad.push_3d", "params": {}}
+      ]
+    }
+  ]
+}

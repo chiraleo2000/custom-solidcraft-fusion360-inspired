@@ -283,3 +283,48 @@ fn req_13_7_calibrated_canvas_revolve_and_shell() {
     assert!((opacity - 0.35).abs() < 1e-9, "{look}");
     assert_consistent(&s);
 }
+
+/// Every scene in `examples/demo/feature_tour.json` runs to completion. The README recording
+/// plays these same scenes.
+#[test]
+fn feature_tour_scenes_cover_the_workspaces() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/demo/feature_tour.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let tour: Value = serde_json::from_str(&text).unwrap();
+    let scenes = tour["scenes"].as_array().expect("scenes");
+    assert!(scenes.len() >= 12, "the tour should visit every major workspace");
+    let mut areas = std::collections::BTreeSet::new();
+    for scene in scenes {
+        let title = scene["title"].as_str().unwrap_or("scene");
+        let commands = scene["commands"].as_array().expect(title);
+        assert!(!commands.is_empty(), "{title}");
+        let mut session = Session::default();
+        let out = session.run_script(&json!({"commands": commands})).unwrap_or_else(|e| panic!("{title}: {e}"));
+        assert_eq!(out.len(), commands.len(), "{title}");
+        assert_consistent(&session);
+        for step in commands {
+            let id = step["command"].as_str().unwrap_or("");
+            assert!(find_command(id).is_some(), "{title} unknown {id}");
+            areas.insert(id.split('.').next().unwrap_or("").to_string());
+        }
+    }
+    for area in [
+        "sketch",
+        "solid",
+        "parameters",
+        "inspect",
+        "surface",
+        "sheet",
+        "form",
+        "mold",
+        "cam",
+        "sim",
+        "drawing",
+        "appearance",
+        "view",
+        "component",
+        "ecad",
+    ] {
+        assert!(areas.contains(area), "tour missing {area}");
+    }
+}
