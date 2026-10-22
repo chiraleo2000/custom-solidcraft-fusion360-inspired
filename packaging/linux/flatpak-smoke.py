@@ -44,7 +44,19 @@ for ((attempt=0; attempt<300; attempt++)); do
   sleep .1
 done
 test "$ready" = 1
-for request in '{"id":1,"method":"ui.inspect","params":{}}' '{"id":2,"method":"engine.execute","params":{"command":"solid.box","params":{"length":30,"width":20,"height":10}}}' '{"id":3,"method":"document.inspect","params":{"measure":true}}'; do
+# The control socket opens before the first frame publishes a viewport rectangle.
+inspect=""
+for ((attempt=0; attempt<50; attempt++)); do
+  printf '%s\n' '{"id":1,"method":"ui.inspect","params":{}}' >&3
+  IFS= read -r -t 30 reply <&3
+  case "$reply" in
+    *'"viewport":['*) inspect=$reply; break ;;
+  esac
+  sleep .1
+done
+test -n "$inspect"
+printf '%s\n' "$inspect"
+for request in '{"id":2,"method":"engine.execute","params":{"command":"solid.box","params":{"length":30,"width":20,"height":10}}}' '{"id":3,"method":"document.inspect","params":{"measure":true}}'; do
   printf '%s\n' "$request" >&3
   IFS= read -r -t 30 reply <&3
   printf '%s\n' "$reply"
@@ -63,8 +75,8 @@ def validate_replies(stdout):
                                 for i, reply in enumerate(replies, 1)):
         raise ValueError(f"desktop control failed: {replies}")
     ui = replies[0]["result"]
-    viewport = ui["viewport"]
-    if (ui["renderer"] not in {"gpu", "cpu"} or len(viewport) != 4
+    viewport = ui.get("viewport")
+    if (ui.get("renderer") not in {"gpu", "cpu"} or not isinstance(viewport, list) or len(viewport) != 4
             or not all(math.isfinite(value) for value in viewport)
             or viewport[2] <= 0 or viewport[3] <= 0):
         raise ValueError("desktop did not create a usable viewport")
