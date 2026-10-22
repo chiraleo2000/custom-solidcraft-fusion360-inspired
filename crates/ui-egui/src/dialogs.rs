@@ -2071,7 +2071,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
                 (galley.size().x + 2.0 * ui.spacing().button_padding.x).max(64.0)
             };
-            let actions = crate::dialog_frame::action_labels(&close, &label);
+            let actions = crate::dialog_frame::action_labels(close, label);
             let (ok_width, close_width) = (button_width(actions[1]), button_width(actions[0]));
             let buttons = close_width + if has_ok { ok_width + ui.spacing().item_spacing.x } else { 0.0 };
             crate::frame::right_aligned(ui, total, buttons, |ui| {
