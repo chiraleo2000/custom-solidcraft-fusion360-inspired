@@ -376,17 +376,13 @@ impl Camera {
         self.distance = if self.fov > 0.0 { r / (self.fov * 0.5).sin() * 1.1 } else { r / 0.4 * 1.15 };
     }
     /// The same camera looking from direction `back` (target → eye). Straight up or down
-    /// keeps the yaw, rounded to the nearest quarter turn so the view stays square.
+    /// keeps the yaw, snapped to the nearest quarter turn so the view stays square. At a
+    /// halfway tie, prefer the heading nearer the standard plan view (yaw 0).
     pub fn looking_from(&self, back: Vec3) -> Camera {
         let Some(b) = self.up.to_frame(back).normalized() else { return *self };
         let lim = std::f64::consts::FRAC_PI_2 - 1e-6;
         let pitch = b.z.clamp(-1.0, 1.0).asin().clamp(-lim, lim);
-        let yaw = if b.x.hypot(b.y) < 1e-6 {
-            let q = std::f64::consts::FRAC_PI_2;
-            (self.yaw / q).round() * q
-        } else {
-            (-b.x).atan2(-b.y)
-        };
+        let yaw = if b.x.hypot(b.y) < 1e-6 { nearest_quarter_turn(self.yaw) } else { (-b.x).atan2(-b.y) };
         Camera { yaw, pitch, roll: 0.0, ..*self }
     }
     /// Orientation as a unit quaternion (camera → world rotation).
@@ -425,6 +421,26 @@ impl Camera {
             && self.roll.is_finite()
             && self.distance.is_finite()
             && self.distance > 0.0
+    }
+}
+
+/// Snap yaw to the nearest multiple of π/2. Non-finite input becomes 0. At an exact halfway
+/// tie, prefer the square heading nearer the standard plan view (yaw 0 / front).
+pub fn nearest_quarter_turn(yaw: f64) -> f64 {
+    if !yaw.is_finite() {
+        return 0.0;
+    }
+    let q = std::f64::consts::FRAC_PI_2;
+    let lo = (yaw / q).floor() * q;
+    let hi = lo + q;
+    let (dlo, dhi) = (yaw - lo, hi - yaw);
+    if (dlo - dhi).abs() < 1e-6 {
+        let off_front = |a: f64| ((a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI).abs();
+        if off_front(lo) <= off_front(hi) { lo } else { hi }
+    } else if dlo < dhi {
+        lo
+    } else {
+        hi
     }
 }
 
@@ -506,6 +522,22 @@ mod tests {
         // Looking from a corner direction.
         let c = a.looking_from(Vec3::new(1.0, -1.0, 1.0));
         assert!(c.back().dist(Vec3::new(1.0, -1.0, 1.0).normalized().unwrap()) < 1e-9);
+    }
+
+    #[test]
+    fn looking_from_top_prefers_plan_yaw_at_iso_halfway() {
+        let mut cam = Camera::default();
+        cam.set_view(StandardView::Iso);
+        let top = cam.looking_from(Vec3::Z);
+        assert!((top.pitch - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+        assert!(top.yaw.abs() < 1e-9, "iso (−45°) → top should keep plan yaw 0, got {}", top.yaw.to_degrees());
+        let angled = Camera { yaw: -2.356194490192345, pitch: 0.6154797086703874, ..Camera::default() };
+        let top = angled.looking_from(Vec3::Z);
+        assert!((top.yaw + std::f64::consts::FRAC_PI_2).abs() < 1e-9, "−135° → top should snap to −90°, got {}", top.yaw.to_degrees());
+        for (from, to) in [(-45.0, 0.0), (45.0, 0.0), (-135.0, -90.0), (135.0, 90.0)] {
+            let got = nearest_quarter_turn(f64::to_radians(from)).to_degrees();
+            assert!((got - to).abs() < 1e-9, "{from}° → {got}°, expected {to}°");
+        }
     }
 
     #[test]

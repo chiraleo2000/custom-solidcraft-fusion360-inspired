@@ -257,21 +257,32 @@ jobs:
     needs: version
     if: needs.version.outputs.build == 'true'
     # GitHub has no FreeBSD runners: build in a FreeBSD 14.3 VM.
-    runs-on: ubuntu-latest
+    # Pin Ubuntu 24.04: nested KVM on ubuntu-latest has been offering only 2 vCPUs, and a
+    # 12 GiB guest fails to allocate after the ~4.5 GiB qcow2 extract ("Cannot allocate memory").
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
       SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
       SOLIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Add swap for the nested FreeBSD VM
+        run: |
+          # Host RAM is shared with the extracted image; a small swap avoids QEMU startup OOM.
+          sudo fallocate -l 6G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=6144
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
       - name: Build and package in a FreeBSD VM (tar.gz)
         # vmactions/freebsd-vm v1.5.9, pinned by commit (it runs our build).
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc
         with:
           release: "14.3"
           usesh: true
-          cpu: 4
-          mem: 12288
+          # Nested KVM on these runners recommends 2 CPUs; the action default is 6144 MiB.
+          cpu: 2
+          mem: 6144
           # Passed into the VM by name; never templated into the script below.
           envs: "SOLIDCRAFT_VERSION SOLIDCRAFT_BUILD_DATE"
           prepare: |
@@ -281,9 +292,9 @@ jobs:
             set -e
             . "$HOME/.cargo/env"
             git config --global --add safe.directory "$PWD"
-            # Build outside the checkout so only dist/ is copied back out of the VM. 4 jobs: more
-            # runs the VM out of memory.
-            export CARGO_TARGET_DIR=/var/tmp/solidcraft-target CARGO_BUILD_JOBS=4
+            # Build outside the checkout so only dist/ is copied back out of the VM. Match the
+            # guest CPU count so cargo does not thrash the 6 GiB guest.
+            export CARGO_TARGET_DIR=/var/tmp/solidcraft-target CARGO_BUILD_JOBS=2
             bash packaging/freebsd/package.sh
             tar -tzf dist/release/solidcraft-*-freebsd-x86_64.tar.gz \
               | grep -E '/bin/solidcraft$|/bin/solidcraft-cli$|/share/applications/ai\.storyteller\.solvecraft\.desktop$|/share/doc/solidcraft/THIRD-PARTY-LICENSES\.txt$'

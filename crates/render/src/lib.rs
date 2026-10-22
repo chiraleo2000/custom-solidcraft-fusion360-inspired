@@ -11,7 +11,7 @@ mod pbr;
 mod raster;
 mod shell;
 
-pub use camera::{Camera, CameraAnim, Mat4, Quat, StandardView, UpAxis, ease_in_out};
+pub use camera::{Camera, CameraAnim, Mat4, Quat, StandardView, UpAxis, ease_in_out, nearest_quarter_turn};
 pub use curve_display::{PixelCurveView, SampledPath, SamplingBudget, SamplingQuality, sample_segment, sample_segment_unclipped};
 pub use field::{result_colour, result_colour_value, result_ramp_png};
 pub use pbr::{StudioLight, studio};

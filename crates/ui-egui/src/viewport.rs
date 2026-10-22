@@ -5,7 +5,7 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, pos2, vec2
 use serde_json::json;
 use solidcraft_engine::Sel;
 use solidcraft_engine::geom::{Vec2, Vec3};
-use solidcraft_engine::render::{Camera, Mat4, Rgb};
+use solidcraft_engine::render::{Camera, Mat4, Rgb, nearest_quarter_turn};
 use solidcraft_engine::sketch::CurveKind;
 use solidcraft_engine::view::{colors, grid_step, sketch_lines_with_sampler};
 use std::hash::{Hash, Hasher};
@@ -3092,25 +3092,6 @@ fn axis_tip_direction(world: Vec3, flip: bool) -> Option<[i8; 3]> {
     Some(dir)
 }
 
-/// At a halfway tie, prefer the square heading nearer the standard plan view.
-fn nearest_quarter_turn(yaw: f64) -> f64 {
-    if !yaw.is_finite() {
-        return 0.0;
-    }
-    let q = std::f64::consts::FRAC_PI_2;
-    let lo = (yaw / q).floor() * q;
-    let hi = lo + q;
-    let (dlo, dhi) = (yaw - lo, hi - yaw);
-    if (dlo - dhi).abs() < 1e-6 {
-        let off_front = |a: f64| ((a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI).abs();
-        if off_front(lo) <= off_front(hi) { lo } else { hi }
-    } else if dlo < dhi {
-        lo
-    } else {
-        hi
-    }
-}
-
 /// Navigation bar (bottom centre).
 /// Turn the view to face the selected planar face or plane, else the active sketch.
 pub fn look_at_selection(app: &mut SolveApp) {
@@ -4466,9 +4447,9 @@ mod tests {
         h.run(&json!([
             {"call":"ui.view","params":{"view":"home"}},
             {"click":{"handle":"axis_view:z"}},
-            {"expect":{"camera":{"pitch_deg":90,"yaw_deg":-90}}},
+            {"expect":{"camera":{"pitch_deg":90,"yaw_deg":0}}},
             {"click":{"handle":"axis_view:z"}},
-            {"expect":{"camera":{"pitch_deg":-90,"yaw_deg":-90}}},
+            {"expect":{"camera":{"pitch_deg":-90,"yaw_deg":0}}},
             {"call":"ui.view","params":{"view":"front"}}
         ]))
         .unwrap();
