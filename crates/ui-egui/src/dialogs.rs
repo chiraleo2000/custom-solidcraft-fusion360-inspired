@@ -3917,26 +3917,14 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
 
 #[cfg(test)]
 mod selection_prompt_tests {
-    use super::{selection_prompt, BODIES, CURVES, EDGES, PLANES, PROFILES};
+    use super::{BODIES, CURVES, EDGES, PLANES, PROFILES, selection_prompt};
     use crate::i18n::Locale;
     use crate::selection::{self, AXES, FACES};
     use solidcraft_engine::Session;
 
     #[test]
     fn every_selection_prompt_translates_and_opening_a_dialog_shows_it() {
-        let masks = [
-            PROFILES,
-            EDGES,
-            PLANES,
-            AXES,
-            CURVES,
-            BODIES,
-            FACES,
-            selection::VERTICES,
-            selection::FEATURES,
-            PROFILES | FACES,
-            0,
-        ];
+        let masks = [PROFILES, EDGES, PLANES, AXES, CURVES, BODIES, FACES, selection::VERTICES, selection::FEATURES, PROFILES | FACES, 0];
         for mask in masks {
             let key = selection_prompt(mask);
             for language in ["en", "ja", "de", "ko"] {

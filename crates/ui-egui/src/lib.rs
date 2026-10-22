@@ -644,11 +644,8 @@ impl SolveApp {
             if d.wants_picks() && !self.session.selection.is_empty() {
                 let _ = self.session.execute("select.clear", &json!({}));
             }
-            let prompt = d
-                .inputs
-                .get(d.active)
-                .filter(|inp| inp.items.is_empty())
-                .map(|inp| self.tr(dialogs::selection_prompt(inp.accept)).to_string());
+            let prompt =
+                d.inputs.get(d.active).filter(|inp| inp.items.is_empty()).map(|inp| self.tr(dialogs::selection_prompt(inp.accept)).to_string());
             if let Some(prompt) = prompt {
                 self.set_status(prompt, false);
             }
