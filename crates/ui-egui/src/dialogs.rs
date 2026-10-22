@@ -885,23 +885,32 @@ fn title(k: &Kind) -> &'static str {
     }
 }
 
-fn hint(inp: &SelInput) -> &'static str {
-    let a = inp.accept;
-    if a & PROFILES != 0 {
-        "click profiles in the view"
-    } else if a & EDGES != 0 {
-        "click edges or faces"
-    } else if a & PLANES != 0 {
-        "click a plane or planar face"
-    } else if a & AXES != 0 {
-        "click an axis or sketch line"
-    } else if a & CURVES != 0 {
-        "click sketch curves"
-    } else if a & BODIES != 0 {
-        "click bodies"
+/// Catalog key for the “what to pick” line on a selection row. Priority follows the
+/// input’s accept mask so a mixed row names the most specific thing first.
+pub(crate) fn selection_prompt(accept: Accept) -> &'static str {
+    if accept & PROFILES != 0 {
+        "dialog.hint.profiles"
+    } else if accept & EDGES != 0 {
+        "dialog.hint.edges"
+    } else if accept & PLANES != 0 {
+        "dialog.hint.planes"
+    } else if accept & AXES != 0 {
+        "dialog.hint.axes"
+    } else if accept & CURVES != 0 {
+        "dialog.hint.curves"
+    } else if accept & BODIES != 0 {
+        "dialog.hint.bodies"
+    } else if accept & selection::VERTICES != 0 {
+        "dialog.hint.vertices"
+    } else if accept & selection::FEATURES != 0 {
+        "dialog.hint.features"
     } else {
-        "click faces"
+        "dialog.hint.faces"
     }
+}
+
+fn hint(inp: &SelInput) -> &'static str {
+    selection_prompt(inp.accept)
 }
 
 /// Width of the label column; longer labels are cut with "…".
@@ -1118,15 +1127,15 @@ fn input_rows(d: &mut Dialog, ui: &mut egui::Ui) {
                         axis.get("dir").map(ToString::to_string).unwrap_or_default()
                     )
                 } else {
-                    hint(inp).to_string()
+                    crate::i18n::tr(hint(inp)).to_string()
                 }
             } else {
-                format!("{} (click to pick into this input)", hint(inp))
+                crate::i18n::format("dialog.hint.pick_into", &[("action", crate::i18n::tr(hint(inp)))])
             };
             if chip.on_hover_text(tooltip).clicked() {
                 activate = Some(i);
             }
-            if !inp.items.is_empty() && ui.small_button("×").on_hover_text("Clear the selection").clicked() {
+            if !inp.items.is_empty() && ui.small_button("×").on_hover_text(crate::i18n::tr("dialog.hint.clear")).clicked() {
                 clear = Some(i);
             }
         });
@@ -3904,6 +3913,48 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
     d.active = 0;
     d.error = None;
     Some(d)
+}
+
+#[cfg(test)]
+mod selection_prompt_tests {
+    use super::{selection_prompt, BODIES, CURVES, EDGES, PLANES, PROFILES};
+    use crate::i18n::Locale;
+    use crate::selection::{self, AXES, FACES};
+    use solidcraft_engine::Session;
+
+    #[test]
+    fn every_selection_prompt_translates_and_opening_a_dialog_shows_it() {
+        let masks = [
+            PROFILES,
+            EDGES,
+            PLANES,
+            AXES,
+            CURVES,
+            BODIES,
+            FACES,
+            selection::VERTICES,
+            selection::FEATURES,
+            PROFILES | FACES,
+            0,
+        ];
+        for mask in masks {
+            let key = selection_prompt(mask);
+            for language in ["en", "ja", "de", "ko"] {
+                let text = Locale::for_language(language).text(key);
+                assert_ne!(text, key, "{language} missing {key}");
+                assert!(!text.is_empty());
+            }
+        }
+        let mut app = crate::SolveApp::new(Session::default(), Default::default());
+        app.start("sketch.create");
+        let (message, _, error) = app.status.clone().expect("plane prompt");
+        assert!(!error);
+        assert_eq!(message, Locale::for_language("en").text("dialog.hint.planes"));
+        assert!(app.dialog.is_some());
+        app.start("solid.extrude");
+        let (message, _, error) = app.status.clone().expect("profile prompt");
+        assert!(!error && message.contains("profile"), "{message}");
+    }
 }
 
 #[cfg(test)]

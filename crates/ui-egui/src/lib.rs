@@ -588,7 +588,7 @@ impl SolveApp {
             if let Some(params) = tools::constraint_preselection(id, &self.session.selection) {
                 if self.run(id, params).is_ok() {
                     let _ = self.session.execute("select.clear", &json!({}));
-                    self.set_status("Constraint applied", false);
+                    self.set_status(self.tr("sketch.status.constraint_applied"), false);
                 }
                 return;
             }
@@ -597,7 +597,7 @@ impl SolveApp {
             {
                 if self.run(id, json!({"refs":refs})).is_ok() {
                     let _ = self.session.execute("select.clear", &json!({}));
-                    self.set_status("Projection applied", false);
+                    self.set_status(self.tr("sketch.status.projection_applied"), false);
                 }
                 return;
             }
@@ -618,7 +618,7 @@ impl SolveApp {
                 let params = json!({ "a": a, "b": b });
                 if self.run(id, params).is_ok() {
                     let _ = self.session.execute("select.clear", &json!({}));
-                    self.set_status("Constraint applied", false);
+                    self.set_status(self.tr("sketch.status.constraint_applied"), false);
                 }
                 return;
             }
@@ -643,6 +643,14 @@ impl SolveApp {
             // The pre-selection now belongs to the dialog's inputs.
             if d.wants_picks() && !self.session.selection.is_empty() {
                 let _ = self.session.execute("select.clear", &json!({}));
+            }
+            let prompt = d
+                .inputs
+                .get(d.active)
+                .filter(|inp| inp.items.is_empty())
+                .map(|inp| self.tr(dialogs::selection_prompt(inp.accept)).to_string());
+            if let Some(prompt) = prompt {
+                self.set_status(prompt, false);
             }
             self.dialog = Some(d);
             return;

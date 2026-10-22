@@ -206,6 +206,8 @@ mod tests {
             include_str!("dialogs.rs"),
             include_str!("browser.rs"),
             include_str!("sketch_palette.rs"),
+            include_str!("timeline.rs"),
+            include_str!("lib.rs"),
         ] {
             for call in [".tr(\"", "i18n::tr(\"", "i18n::format(\""] {
                 for tail in source.split(call).skip(1) {
