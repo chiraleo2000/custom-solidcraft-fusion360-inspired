@@ -1,13 +1,13 @@
 # Fast checks always run; native builds run for code/CI changes.
 # Tests are built once and run in 4 shards. A few heavy tests (see .config/nextest.toml) are
-# skipped on pull requests and run on pushes to main and nightly.
+# skipped on pull requests and run on pushes to main, dev, and nightly.
 # Cross-compilation is opt-in through Run workflow; release builds remain in release.yml.
 name: CI
 
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, dev]
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
@@ -22,7 +22,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Every push to main gets its full run; a new PR push replaces the old run.
+  # Every push to main or dev gets its full run; a new PR push replaces the old run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

@@ -3,7 +3,7 @@
 
 [profile.ci]
 # Heavy tests (one to four minutes each on a CI runner) that pull requests skip. They run on
-# every push to main and nightly (`--ignore-default-filter`), and in `cargo xtask test`.
+# every push to main or dev and nightly (`--ignore-default-filter`), and in `cargo xtask test`.
 # Keep this list in sync with docs/book/src/dev/testing.md and CONTRIBUTING.md.
 default-filter = """
 not (

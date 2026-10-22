@@ -5,7 +5,7 @@ name: Packaging lint
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths: [".github/workflows/**", "packaging/**"]
   pull_request:
     paths: [".github/workflows/**", "packaging/**"]
