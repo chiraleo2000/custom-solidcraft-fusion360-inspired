@@ -6,6 +6,11 @@ pub fn footer_labels() -> [&'static str; 2] {
     ["Cancel", "OK"]
 }
 
+/// Dismiss then confirm, so every dialog paints Cancel (or Close) before OK.
+pub fn action_labels<'a>(dismiss: &'a str, confirm: &'a str) -> [&'a str; 2] {
+    [dismiss, confirm]
+}
+
 /// The footer is not inside the field scroller.
 pub fn footer_outside_scroll() -> bool {
     true
@@ -34,6 +39,8 @@ mod tests {
     fn property_17_cancel_leaves_the_design_and_the_footer_stays_reachable() {
         assert!(footer_outside_scroll());
         assert_eq!(footer_labels(), ["Cancel", "OK"]);
+        assert_eq!(super::action_labels("Cancel", "OK"), ["Cancel", "OK"]);
+        assert_eq!(super::action_labels("Close", "Delete"), ["Close", "Delete"]);
         let mut cases = 0usize;
         for n in 1..=100 {
             let mut h = crate::scenario::Harness::new();

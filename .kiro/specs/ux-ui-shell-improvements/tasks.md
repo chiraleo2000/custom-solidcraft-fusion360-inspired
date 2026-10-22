@@ -422,10 +422,13 @@ Language: Rust (the only language in the repo; the design uses Rust, not pseudoc
   `dialog_bg`/`dialog_border`/`accent`/`accent_soft` tokens and no `coaching_callout`/
   `coaching_connector` fields were added, i.e. the review found existing tokens sufficient, so the
   conditional task is satisfied with no change.
-- The whole-shell arc (tasks 15–26) is NOT implemented and remains unchecked: there is no
-  `crates/engine/src/cmd/view.rs` (`view.*` commands), no `crates/ui-egui/src/dialog_frame.rs`, and
-  no Properties 15–25 in the repo. Task 14 (full `cargo xtask ci`) is left unchecked because the
-  whole feature is not complete and the full gate was not run during this audit.
+- The whole-shell arc (tasks 15–25) **is implemented on fork `dev`** as of 2026-10-22:
+  `crates/engine/src/cmd/view.rs` (`view.standard.*`, `view.fit`, `view.orient`),
+  `crates/ui-egui/src/dialog_frame.rs` (Cancel-before-OK via `action_labels`),
+  `palette.rs` ranking/synonyms, timeline dwell + token states + localized context menu,
+  browser three-state sketch constraint indicator, and Properties 7, 9, 15–25.
+  Checkboxes below were left as the original spec; do not rebuild those surfaces.
+  Task 14 / 26 (`cargo xtask ci`) stay open until a full gate is green on this fork.
 
 ## Task Dependency Graph
 

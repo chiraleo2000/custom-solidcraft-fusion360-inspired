@@ -245,34 +245,35 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
                         _ => None,
                     };
                     resp.context_menu(|ui| {
-                        if ui.button("Edit Feature").clicked() {
+                        if ui.button(app.tr("timeline.menu.edit")).clicked() {
                             edit = Some(*id);
                             ui.close();
                         }
                         if let Some(sk) = sketch_of
-                            && ui.button("Edit Profile Sketch").clicked()
+                            && ui.button(app.tr("timeline.menu.edit_sketch")).clicked()
                         {
                             app.edit_sketch(sk);
                             ui.close();
                         }
-                        if ui.button("Rename").clicked() {
+                        if ui.button(app.tr("timeline.menu.rename")).clicked() {
                             app.dialog = Some(crate::dialogs::Dialog::rename(*id, name));
                             ui.close();
                         }
-                        if ui.button(if *suppressed { "Unsuppress Features" } else { "Suppress Features" }).clicked() {
+                        let suppress = if *suppressed { "timeline.menu.unsuppress" } else { "timeline.menu.suppress" };
+                        if ui.button(app.tr(suppress)).clicked() {
                             let _ = app.run("timeline.suppress", json!({"feature": id}));
                             ui.close();
                         }
-                        if ui.button("Roll History Marker Here").clicked() {
+                        if ui.button(app.tr("timeline.menu.roll_here")).clicked() {
                             let _ = app.run("timeline.roll_to", json!({ "feature": id }));
                             ui.close();
                         }
-                        if ui.button("Find in Browser").clicked() {
+                        if ui.button(app.tr("timeline.menu.find_browser")).clicked() {
                             find_in_browser(app, *id);
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("Delete").clicked() {
+                        if ui.button(app.tr("timeline.menu.delete")).clicked() {
                             delete_feature(app, *id);
                             ui.close();
                         }

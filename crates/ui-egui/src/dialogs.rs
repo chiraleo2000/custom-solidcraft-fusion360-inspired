@@ -2071,15 +2071,15 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
                 (galley.size().x + 2.0 * ui.spacing().button_padding.x).max(64.0)
             };
-            let (ok_width, close_width) = (button_width(label), button_width(close));
+            let actions = crate::dialog_frame::action_labels(&close, &label);
+            let (ok_width, close_width) = (button_width(actions[1]), button_width(actions[0]));
             let buttons = close_width + if has_ok { ok_width + ui.spacing().item_spacing.x } else { 0.0 };
-            let _footer = crate::dialog_frame::footer_labels();
             crate::frame::right_aligned(ui, total, buttons, |ui| {
-                if ui.add(egui::Button::new(close).wrap_mode(egui::TextWrapMode::Extend).min_size(vec2(close_width, 24.0))).clicked() {
+                if ui.add(egui::Button::new(actions[0]).wrap_mode(egui::TextWrapMode::Extend).min_size(vec2(close_width, 24.0))).clicked() {
                     cancel = true;
                 }
                 if has_ok {
-                    let b = egui::Button::new(RichText::new(label).color(if valid { Color32::WHITE } else { t.text_dim }))
+                    let b = egui::Button::new(RichText::new(actions[1]).color(if valid { Color32::WHITE } else { t.text_dim }))
                         .fill(if valid { t.accent } else { Color32::TRANSPARENT })
                         .wrap_mode(egui::TextWrapMode::Extend)
                         .min_size(vec2(ok_width, 24.0));

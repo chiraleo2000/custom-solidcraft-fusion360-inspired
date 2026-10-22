@@ -29,6 +29,14 @@ Property tags: each property test references its design property as
 
 ---
 
+## Reconciliation (2026-10-22, fork `dev`)
+
+The command surface for Stages 1–6, mold, and DfAM is already on this branch
+(`docs/features.md`, engine `cmd/*`). Unchecked boxes below were written before that
+work and are **not** a queue to rebuild those commands. Do not reimplement `surface.*`,
+`form.*`, `mesh.*`, `drawing.*`, `cam.*`, `sim.*`, `render.*`, `ecad.*`, or `mold.*`.
+Still deferred: PCB autorouting and a cloud renderer.
+
 ## Tasks
 
 ### Stage 1A — Surface workspace depth (Requirement 3 · design §1A)
