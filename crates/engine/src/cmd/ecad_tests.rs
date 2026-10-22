@@ -153,10 +153,7 @@ fn missing_schematic_and_board_fields_still_load() {
     let mut value: Value = serde_json::from_str(&Document::new("Old").to_json()).unwrap();
     value["schematic"] = json!({"parts": ["U1"], "wires": [["vcc", "gnd"]], "board_width": 30, "board_height": 20, "traces": [[0, 0, 5, 0, 0.2], [0.1, 0, 5, 0, 0.2]]});
     assert!(value.get("board").is_none());
-    let mut s = Session {
-        doc: Document::from_json(&value.to_string()).unwrap().into(),
-        ..Session::default()
-    };
+    let mut s = Session { doc: Document::from_json(&value.to_string()).unwrap().into(), ..Session::default() };
     assert!(s.doc.board.is_none());
     assert!(s.doc.schematic.as_ref().is_some_and(|sc| sc.components.is_empty() && sc.nets.is_empty()));
     let before = s.doc.to_json();
