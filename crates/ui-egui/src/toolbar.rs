@@ -407,6 +407,22 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     export(app, "obj");
                     close = true;
                 }
+                if item_if(ui, "Export glTF…", "", shown) {
+                    export(app, "gltf");
+                    close = true;
+                }
+                if item_if(ui, "Export GLB…", "", shown) {
+                    export(app, "glb");
+                    close = true;
+                }
+                if item_if(ui, "Export PLY…", "", shown) {
+                    export(app, "ply");
+                    close = true;
+                }
+                if item_if(ui, "Export USD…", "", shown) {
+                    export(app, "usda");
+                    close = true;
+                }
                 if item(ui, "Export Design as JSON…", "") {
                     export(app, "json");
                     close = true;

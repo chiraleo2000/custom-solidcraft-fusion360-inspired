@@ -174,4 +174,110 @@ mod tests {
         assert!(s.execute("dfam.nest", &json!({"bodies": [], "width": "10", "depth": "10"})).is_err());
         assert_eq!(s.doc.to_json(), before);
     }
+
+    fn volume_of_all_but(s: &Session, skip: &str) -> f64 {
+        let st = s.world_state();
+        st.bodies.iter().filter(|b| b.name != skip).map(|b| solidcraft_kernel::measure(&b.body).map(|m| m.volume).unwrap_or(0.0)).sum()
+    }
+
+    /// Feature: fusion360-feature-parity, Property 28 (later-phase): a split union equals the
+    /// pre-split mold, and the prototype survives the cavity cut (Keep Tools).
+    #[test]
+    fn property_28_split_halves_add_up_to_the_cut_mold() {
+        let mut split_cases = 0;
+        for (len, wid, hei, margin) in [(10.0, 10.0, 10.0, 5.0), (12.0, 8.0, 6.0, 3.0), (20.0, 15.0, 10.0, 4.0), (7.0, 7.0, 7.0, 2.0)] {
+            let mut s = Session::default();
+            run(&mut s, "solid.box", json!({"length": len, "width": wid, "height": hei, "body_name": "Part"}));
+            run(&mut s, "mold.box", json!({"body": "Part", "margin": margin.to_string(), "body_name": "Mold"}));
+            run(&mut s, "mold.cavity", json!({"mold": "Mold", "tool": "Part"}));
+            assert!(s.world_state().body("Part").is_some(), "Keep Tools keeps the prototype");
+            let cut_volume = volume_of_all_but(&s, "Part");
+            let part_volume = len * wid * hei;
+            let outer = (len + 2.0 * margin) * (wid + 2.0 * margin) * (hei + 2.0 * margin);
+            assert!((cut_volume - (outer - part_volume)).abs() < 1e-3, "cavity volume {cut_volume} vs {}", outer - part_volume);
+            let split = s.execute("mold.split", &json!({"body": "Mold", "plane": {"origin": [0.0, 0.0, hei * 0.5], "normal": [0.0, 0.0, 1.0]}}));
+            if let Err(e) = split {
+                // A plane the kernel cannot split through the cavity is reported, never panicked on.
+                assert!(!matches!(e, crate::EngineError::Internal(..)), "{e}");
+                continue;
+            }
+            let halves = volume_of_all_but(&s, "Part");
+            assert!((halves - cut_volume).abs() < 1e-3, "split union {halves} vs mold {cut_volume}");
+            assert!(s.world_state().bodies.len() >= 3, "the split adds a second half");
+            split_cases += 1;
+        }
+        assert!(split_cases >= 1, "at least one case must really split");
+    }
+
+    /// Feature: fusion360-feature-parity, Property 28 (later-phase): nested bodies are
+    /// non-overlapping and stay inside the bed, for generated sizes and gaps.
+    #[test]
+    fn property_28_nested_bodies_do_not_overlap_and_fit_the_bed() {
+        let mut checked = 0;
+        for count in 2..=5usize {
+            for (size, gap) in [(4.0, 1.0), (6.0, 2.0), (8.0, 0.5), (5.0, 3.0), (3.0, 0.0)] {
+                let mut s = Session::default();
+                let names: Vec<String> = (0..count).map(|i| format!("N{i}")).collect();
+                for n in &names {
+                    run(&mut s, "solid.box", json!({"length": size, "width": size, "height": 2, "body_name": n}));
+                }
+                let bed = (size + gap) * count as f64 + size;
+                run(&mut s, "dfam.nest", json!({"bodies": names, "width": bed.to_string(), "depth": bed.to_string(), "gap": gap.to_string()}));
+                let st = s.world_state();
+                let boxes: Vec<_> = names.iter().map(|n| st.body(n).unwrap().mesh().bounds()).collect();
+                for b in &boxes {
+                    assert!(b.max.x - b.min.x <= bed + 1e-6 && b.max.y - b.min.y <= bed + 1e-6);
+                }
+                for (i, a) in boxes.iter().enumerate() {
+                    for b in boxes.iter().skip(i + 1) {
+                        let x = a.min.x < b.max.x - 1e-9 && b.min.x < a.max.x - 1e-9;
+                        let y = a.min.y < b.max.y - 1e-9 && b.min.y < a.max.y - 1e-9;
+                        assert!(!(x && y), "overlap {a:?} {b:?}");
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20);
+    }
+
+    /// Feature: fusion360-feature-parity, Property 1: Hostile input never crashes and leaves the
+    /// design unchanged, over all `mold.*` / `dfam.*` commands.
+    #[test]
+    fn property_1_hostile_mold_and_dfam_inputs_leave_the_design_unchanged() {
+        let mut base = Session::default();
+        run(&mut base, "solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "Part"}));
+        run(&mut base, "mold.box", json!({"body": "Part", "margin": "5", "body_name": "Mold"}));
+        let saved = base.doc.to_json();
+        let ids = ["mold.box", "mold.cavity", "mold.split", "mold.alignment_pins", "mold.pour_spout", "dfam.clearance", "dfam.nest"];
+        let payloads = [
+            json!(null),
+            json!({}),
+            json!({"body": "Mold", "margin": "nan", "gap": "inf", "width": "nan", "depth": "-inf"}),
+            json!({"body": "", "mold": "", "tool": "", "upper": "", "lower": "", "bodies": []}),
+            json!({"body": "Nope", "mold": "Nope", "tool": "Nope", "upper": "Nope", "lower": "Nope", "bodies": ["Nope"]}),
+            json!({"mold": "Mold", "tool": "Mold", "upper": "Mold", "lower": "Mold", "diameter": "2", "depth": "2"}),
+            json!({"body": "Mold", "width": "0", "depth": "0", "diameter": "0", "gap": "0", "margin": "0"}),
+            json!({"body": "Mold", "width": "-5", "depth": "-5", "diameter": "-1", "gap": "-1", "margin": "-1"}),
+            json!({"body": "Mold", "width": "1e300", "depth": "1e300", "diameter": "1e300", "gap": "1e300", "margin": "1e300"}),
+            json!({"body": "Mold", "plane": {"origin": [0.0, 0.0, 1.0e308], "normal": [0.0, 0.0, 0.0]}}),
+            json!({"body": "Mold", "plane": {"origin": [0.0, 0.0, 500.0], "normal": [0.0, 0.0, 1.0]}}),
+            json!({"bodies": ["Mold", "Mold", "Part"], "width": "1", "depth": "1", "gap": "1"}),
+            json!({"bodies": (0..300).map(|i| format!("B{i}")).collect::<Vec<_>>(), "width": "10", "depth": "10"}),
+            json!({"body": 42, "mold": [1], "tool": {"x": 1}, "bodies": "Mold", "width": [1], "gap": {"a": 1}}),
+            json!({"body": "Mold", "gap": "1 mm", "width": "5 mm", "depth": "1000000 mm", "diameter": "1000000 mm"}),
+        ];
+        assert!(ids.len() * payloads.len() >= 100);
+        for id in ids {
+            for payload in &payloads {
+                let mut s = Session::new(solidcraft_doc::Document::from_json(&saved).unwrap());
+                let before = s.doc.to_json();
+                match s.execute(id, payload) {
+                    Err(crate::EngineError::Internal(cmd, msg)) => panic!("{cmd} {payload}: {msg}"),
+                    Err(_) => assert_eq!(s.doc.to_json(), before, "{id} {payload} changed the design"),
+                    Ok(_) => {}
+                }
+            }
+        }
+    }
 }

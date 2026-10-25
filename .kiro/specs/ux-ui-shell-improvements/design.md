@@ -9,7 +9,9 @@ workspace or modelling capability: the sketch tools, command palette, ribbon, fe
 3D viewport and view navigation, keyboard map, feature timeline, browser/model tree, inference/
 snap engine, dimension entry, sketch display, and coaching surface already exist in
 `crates/ui-egui` (L5). The deferred `ROADMAP.md` workspaces (Surface/FORM, Render, Animation,
-Simulation, CAM, PCB, 2D Drawing) stay out of scope.
+Simulation, CAM, PCB, 2D Drawing) stay out of scope. 3D interchange export
+(STEP/glTF/… and proprietary refusals) is owned by `fusion360-feature-parity`
+Requirement 15 — this shell only starts `file.export` and must not grow format writers.
 
 The original sketch-focused outcomes (Requirements 1–6) remain exactly as designed below:
 active sketch-tool feedback, inline prompts, snap/inference legibility, dimension-entry

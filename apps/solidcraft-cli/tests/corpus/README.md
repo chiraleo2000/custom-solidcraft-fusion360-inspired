@@ -18,6 +18,7 @@ hostile variants of it never panic.
 | `naming-split-pieces` | 9a979cf | format 13 names: a slot splits the top; fillet, chamfer and offset face name its pieces by number (`F2:top#2`) |
 | `split-body-pieces` | v0.3.2 (07e263d) | a slot along X cuts a block into two bodies; a fillet, a chamfer and an appearance refer to the pieces by body name (`Body1`, `Body1 (1)`) |
 | `issue-489-stacked-join` | v0.6.0 (809ecf7), desktop | a 70 × 84 extrude, then a 70 × 62 strip joined on its top face, sketched partly over the face's projected edges (issue #489; expected values from main at 2880525) |
+| `old-form-pulls` | format 11, pulls only | a cylinder form saved before cage edits, symmetry and creases existed; those fields default and the pull still evaluates |
 
 The scripts that made them are in `scripts/` (`issue-489-stacked-join` was drawn in the desktop
 app and has none). Every flat face of every final body must also take an attached sketch and an

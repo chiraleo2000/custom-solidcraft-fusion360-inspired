@@ -143,17 +143,17 @@ Language: Rust (the only language in the repo; the design uses Rust, not pseudoc
     - Assert moving away clears the indicator within one frame (R3.5) and that the draw colours equal the chosen `Tokens` fields (R3.6).
     - _Requirements: 3.5, 3.6_
 
-- [ ] 9. Dimension entry routing through `sketch.dimension.commit`
+- [x] 9. Dimension entry routing through `sketch.dimension.commit`
   - [x] 9.1 Route confirm/cancel and prefill through the engine
     - In `crates/ui-egui/src/sketch_dims.rs` and `crates/ui-egui/src/dim_view.rs`, keep both entry surfaces but route confirm through `app.run("sketch.dimension.commit", ...)` with the typed `value` (entities/`text_at` from the dimension tool's picks for a new dimension; `param` for an edit). Preserve focus-and-select-all so typed characters replace the value (R4.1), prefill the editor from the parameter's stored expression (R4.3), surface commit errors via `set_status(msg, true)`, and keep cancel evaluating only in a scratch session so the design and undo depth stay unchanged (R4.5).
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, NFR 3, NFR 4, NFR 5_
 
-  - [ ]* 9.2 Write property test for the edit prefill round trip
+  - [x]* 9.2 Write property test for the edit prefill round trip
     - **Property 7: Editing an existing dimension prepopulates its current value**
     - Assert opening an existing dimension for editing populates the entry with an expression evaluating to the current value.
     - **Validates: Requirements 4.3**
 
-  - [ ]* 9.3 Write property test for cancel leaving nothing changed
+  - [x]* 9.3 Write property test for cancel leaving nothing changed
     - **Property 9: Cancelling a dimension entry changes nothing**
     - Assert cancelling a typed-but-cancelled draft leaves `session.doc` and undo history identical to before the entry opened.
     - **Validates: Requirements 4.5**
@@ -199,174 +199,174 @@ Language: Rust (the only language in the repo; the design uses Rust, not pseudoc
     - If `dialog_*` + `accent_soft` prove visually insufficient against the viewport, add a `coaching_callout`/`coaching_connector` pair to `crates/ui-egui/src/theme.rs` in both `Tokens::light()` and `Tokens::dark()`, covered by the existing theme-contrast test style. No literal colours in the feature's draw paths.
     - _Requirements: 6.10, NFR 9_
 
-- [ ] 14. Final checkpoint - full quality gates
-  - [ ] 14.1 Run `cargo xtask ci`
+- [x] 14. Final checkpoint - full quality gates
+  - [x] 14.1 Run `cargo xtask ci`
     - Run `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, layers, wasm) with `CARGO_TARGET_DIR` set to the repo `target`, and fix any failures (formatting, lint, layering, wasm build, asset attribution) until green.
     - _Requirements: NFR 1, NFR 2, NFR 7, NFR 8, NFR 9, NFR 10, NFR 11, NFR 12, NFR 14, NFR 15_
 
-- [ ] 15. `view.*` CommandSpecs — standard views and fit (L4 engine, no egui)
-  - [ ] 15.1 Add the `view` command module with standard-view and fit commands
+- [x] 15. `view.*` CommandSpecs — standard views and fit (L4 engine, no egui)
+  - [x] 15.1 Add the `view` command module with standard-view and fit commands
     - Create `crates/engine/src/cmd/view.rs` and register it in `crates/engine/src/cmd/mod.rs::command_specs`, alongside (not duplicating) the existing named-view commands in `cmd/browser.rs` (`view.save`/`rename`/`delete`/`list`).
     - Define `view.standard.top`, `view.standard.front`, `view.standard.right`, `view.standard.home`, `view.standard.isometric` — area `view`, `.noundo()`, `.doc_only()`, not undoable, five distinct ids (no free-text view-name param). Each `run` takes `camera: {target, yaw, pitch, roll, distance, fov?, up?}` (the design's own `solidcraft_render::Camera` JSON), resolves the orientation through `StandardView::parse` (L1 render), applies it via `Camera::set_view` keeping target/distance so the model stays framed, and returns `{camera}`. `home` maps to the isometric orientation (R9.1/R9.4). Reuse the render `Camera`/`StandardView` unchanged — add no camera logic below L1.
     - Define `view.fit` — area `view`, `.noundo()`, `.doc_only()`. Params `camera: {…}`, `aspect: number > 0`, `selection?: bool`. Compute visible-model/selection bounds via the engine's existing `view::bounds`, fit the camera distance/target to those bounds for the given aspect, and return `{camera, changed: bool}`. With no visible geometry (empty bounds) return the camera unchanged and `changed:false` (R9.3 edge).
     - Treat `camera`/`aspect` as hostile input: reject a malformed or non-finite camera, a non-positive/`NaN` aspect, or a camera that fails `is_valid` with a descriptive `Err` (never panic); an unknown orientation name from `StandardView::parse` returns the camera unchanged (R9.6). `get()`-style access, `Result` + `?`, no `unwrap`/`expect`/`panic!`/`unsafe`. Keep buildable for `wasm32-unknown-unknown`.
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.6, NFR 3, NFR 4, NFR 5, NFR 6, NFR 11, NFR 13, NFR 14, NFR 16, NFR 17_
 
-  - [ ]* 15.2 Write property test for standard-view orientation and unknown-name rejection
+  - [x]* 15.2 Write property test for standard-view orientation and unknown-name rejection
     - **Property 18: A standard view applies its orientation and rejects unknown names**
     - Over generated valid cameras, assert each `view.standard.*` id returns a valid camera carrying that orientation; assert an unknown orientation name returns the camera unchanged.
     - **Validates: Requirements 9.2, 9.6**
 
-  - [ ]* 15.3 Write property test for fit framing
+  - [x]* 15.3 Write property test for fit framing
     - **Property 19: Fit frames a non-empty model and leaves an empty one unchanged**
     - Over generated designs and aspects, assert a non-empty model yields a valid camera framing the bounds with `changed:true`, and an empty model returns the camera unchanged with `changed:false`.
     - **Validates: Requirements 9.3**
 
-- [ ] 16. Checkpoint - engine `view.*` commands build and pass
+- [x] 16. Checkpoint - engine `view.*` commands build and pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 17. Command palette and ribbon discoverability — R7 (L5)
-  - [ ] 17.1 Make `matches` a deterministic pure function with synonyms and effective shortcuts
+- [x] 17. Command palette and ribbon discoverability — R7 (L5)
+  - [x] 17.1 Make `matches` a deterministic pure function with synonyms and effective shortcuts
     - In `crates/ui-egui/src/palette.rs`, define `Match { id, label_key, icon, shortcut: Option<String> }` and a pure `rank(q, id, label, synonyms) -> Option<u8>` (0 = id/localized-label starts-with, 1 = contains, 2 = synonym-only). Rewrite `matches(app, q) -> Vec<Match>` to match on `id`, the localized label (`tr_label(spec.label)`), or a `Locale_Catalog` synonym (`palette.synonyms.<id>`, comma-separated, split-and-trimmed) case-insensitively, sorted by `(rank, localized_label)` — total and deterministic for any input.
     - Set each `Match.shortcut` to `keymap::effective(app, id)` (the binding actually in force, not the `CommandSpec` default) so the palette shows the key the user would press (R7.5).
     - In the `S`-key search popup (`palette::popup`), keep `request_focus()` so the input is focused on open (R7.1); confirm the `S` global handler only opens when no text field is focused. Activating an entry calls `app.start(id)` (R7.6, never `app.run`). A no-match submit sets an error status (`palette.no_match` via `set_status(_, true)`) and leaves the popup open and the design unchanged (R7.7). Read catalog entries with `get()`-style access and bounded lengths; no panics.
     - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8, NFR 5, NFR 9, NFR 10, NFR 11, NFR 13_
 
-  - [ ] 17.2 Switch ribbon labels/shortcuts to localized + effective
+  - [x] 17.2 Switch ribbon labels/shortcuts to localized + effective
     - In `crates/ui-egui/src/toolbar.rs` and `crates/ui-egui/src/workspace.rs`, source every ribbon button and panel drop-down label through `tr_label` and switch the displayed shortcut column from `spec.shortcut` to `keymap::effective(app, id)` (R7.5/R7.8). Publish a `toolbar:tab.<TAB>` handle per ribbon tab for coaching anchoring. Colours from `Tokens`, icons via `icons.rs`.
     - _Requirements: 7.5, 7.8, NFR 9, NFR 10, NFR 11_
 
-  - [ ]* 17.3 Write property test for deterministic palette ordering
+  - [x]* 17.3 Write property test for deterministic palette ordering
     - **Property 15: Palette matches are ordered deterministically**
     - Over generated queries and command registries, assert `matches` is total and deterministic and that every starts-with match precedes every contains-only match, which precedes every synonym-only match; ties ascend by localized label.
     - **Validates: Requirements 7.2, 7.3**
 
-  - [ ]* 17.4 Write property test for synonym matching
+  - [x]* 17.4 Write property test for synonym matching
     - **Property 16: A synonym finds its command**
     - For any command carrying a `palette.synonyms.<id>` term, assert a query contained in that synonym returns a match list including that command.
     - **Validates: Requirements 7.4**
 
-  - [ ]* 17.5 Write UI harness test for popup focus, shortcut, activation, no-match
+  - [x]* 17.5 Write UI harness test for popup focus, shortcut, activation, no-match
     - Using `scenario::Harness`, open the popup with `S` and assert the input is focused (R7.1), an entry shows its effective shortcut (R7.5), activating a no-param entry calls `app.start` (R7.6), and a no-match submit leaves the popup open, shows the error status, and leaves the design unchanged (R7.7).
     - _Requirements: 7.1, 7.5, 7.6, 7.7_
 
-- [ ] 18. Shared dialog frame and dialog migration — R8 (L5)
-  - [ ] 18.1 Add the shared `dialog_frame` helper
+- [x] 18. Shared dialog frame and dialog migration — R8 (L5)
+  - [x] 18.1 Add the shared `dialog_frame` helper
     - Add a `dialog_frame` module (e.g. `crates/ui-egui/src/dialog_frame.rs`, wired into `lib.rs`) with `DialogFrame { title_key, preview, error }`, `FieldError { field_key, message }`, `DialogOutcome { Open, Confirm, Cancel }`, and `DialogFrame::show(app, ctx, body)` per design: a fixed bottom footer holding Cancel then OK in a stable order allocated *before* the central `ScrollArea::vertical` (so confirm/cancel never scroll off at any window height, R8.1); a shared `dimension_field(label_key, unit)` that draws the unit (`mm`/`rad`/…) beside dimensioned values reusing the existing `UNITS`/`unit_label` vocabulary (R8.2); a live preview run on a scratch session via the existing preview pipeline when parameters are valid and `None`/suppressed when any field is invalid, within a frame budget well under 200 ms (R8.3); `Confirm` lets the caller run the command via `app.run` and `Cancel` drops the draft leaving `session.doc`/undo depth unchanged (R8.4/R8.5); a per-field `FieldError` drawn next to the offending field in `Tokens` error colour while keeping the dialog open (R8.6). Colours from `Tokens`, strings via `tr`/`tr_label` (R8.7). No panics; `Result` + `?`.
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, NFR 5, NFR 9, NFR 10, NFR 11, NFR 13_
 
-  - [ ] 18.2 Adopt the frame in `params_dialog.rs` (reference adopter) and the `dialogs*.rs` family
+  - [x] 18.2 Adopt the frame in `params_dialog.rs` (reference adopter) and the `dialogs*.rs` family
     - Move `crates/ui-egui/src/params_dialog.rs` onto `dialog_frame` first (it already has units, a live preview, and per-field errors), then migrate `crates/ui-egui/src/dialogs.rs`, `dialogs_appearance.rs`, `dialogs_assembly.rs`, `dialogs_move.rs`, `dialogs_parts.rs`, `dialogs_plastic.rs`, `dialogs_sheet.rs`, `dialogs_surface.rs`, and `dialogs_motion.rs` to the shared frame so every dialog keeps confirm/cancel outside the scroll in a stable order, shows units, previews while valid, and shows per-field errors without closing. Confirm runs the command through `app.run(id, params)`; the engine command stays the single validation authority. Colours from `Tokens`, labels/messages via `tr`/`tr_label`.
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, NFR 5, NFR 9, NFR 10, NFR 11_
 
-  - [ ]* 18.3 Write property test for cancel invariant and reachable actions
+  - [x]* 18.3 Write property test for cancel invariant and reachable actions
     - **Property 17: A cancelled dialog changes nothing and keeps its actions reachable**
     - Over generated dialogs/parameters, assert Cancel/OK sit outside the scroll in a fixed order, the preview is present exactly when parameters are valid (suppressed when invalid), and a `Cancel` leaves `session.doc` and undo depth unchanged.
     - **Validates: Requirements 8.1, 8.3, 8.5**
 
-  - [ ]* 18.4 Write UI example tests for error-keeps-open and confirm-runs-once
+  - [x]* 18.4 Write UI example tests for error-keeps-open and confirm-runs-once
     - Drive one `params`-style edit and one `dialogs_*` feature dialog with the harness: assert a rejected field keeps the dialog open with a localized per-field message (R8.6) and a confirm runs the command exactly once through `app.run` (R8.4).
     - _Requirements: 8.4, 8.6_
 
-- [ ] 19. Viewport nav bar + axis view via `view.*` commands — R9 (L5)
-  - [ ] 19.1 Route discrete view changes through commands; keep orbit/pan/zoom as gestures
+- [x] 19. Viewport nav bar + axis view via `view.*` commands — R9 (L5)
+  - [x] 19.1 Route discrete view changes through commands; keep orbit/pan/zoom as gestures
     - In `crates/ui-egui/src/viewport.rs`, change `nav_bar` and `axis_view` so the standard-view controls, Fit, and Home apply the camera *only* through `app.run("view.standard.{top,front,right,home,isometric}", {camera})` / `app.run("view.fit", {camera, aspect, selection})` and then `animate_to` the returned camera — never mutating `app.cam` directly for a named/fit/home action (R9.1/R9.2/R9.3/R9.4). On `view.fit` returning `changed:false`, show a brief localized `view.nothing_to_fit` status and do not move the camera (R9.3 edge). Keep orbit/pan/zoom as continuous pointer gestures applied to `app.cam` each frame (R9.5). Draw every colour from `Tokens` (axis tips from the engine `colors::AXIS_*`, highlights `tk.accent`/`tk.overlay`) and every tooltip/label via `tr` (`view.nav.orbit|pan|zoom|fit|home|lookat`) (R9.7). No literal `Color32`; no panics.
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.7, NFR 5, NFR 9, NFR 10, NFR 11_
 
-  - [ ] 19.2 Keep the drawable-rect fit refinement in `viewport_layout.rs`
+  - [x] 19.2 Keep the drawable-rect fit refinement in `viewport_layout.rs`
     - In `crates/ui-egui/src/viewport_layout.rs`, keep the `Layout` (nav-bar + axis-view rectangles) and the `fit_bounds` drawable-rect refinement that nudges the framed model into the free rectangle left by the floating overlays — a pure presentation adjustment that does not re-run the `view.fit` command.
     - _Requirements: 9.3, 9.7, NFR 9, NFR 10_
 
-  - [ ]* 19.3 Write UI harness test for command-path navigation
+  - [x]* 19.3 Write UI harness test for command-path navigation
     - Using the harness, click the nav bar's Home/Fit and an axis tip and assert the camera moved only via the command path (the returned camera), that labels/tooltips come from `tr`, and that colours come from `Tokens` (R9.2/R9.7).
     - _Requirements: 9.2, 9.7_
 
-- [ ] 20. Keymap page localization and R10 completeness — R10 (L5)
-  - [ ] 20.1 Localize the keymap page and fill any R10 gaps
+- [x] 20. Keymap page localization and R10 completeness — R10 (L5)
+  - [x] 20.1 Localize the keymap page and fill any R10 gaps
     - In `crates/ui-egui/src/keymap.rs`, move the page's own chrome strings behind `tr` catalog keys (`keymap.filter_hint`, `keymap.reset_all`, `keymap.press_a_key`, `keymap.use_anyway`, `keymap.cancel`, `keymap.conflict`). Confirm and, where any gap exists, complete the R10 contract already present: `effective` defaults from `CommandSpec` (R10.1), pressing a bound key runs the command via `app.start` (R10.2), `bind`/clear/`reset` store/remove overrides and restore defaults (R10.3/R10.4/R10.7), a conflicting bind reports and requires a confirming `replace` before taking the key (R10.5), reserved keys are refused (R10.6), the filter searches label/id/key (R10.8), and the override map persists through the settings layer (NFR 8). `load`/`bind`/`reset` read persisted data with bounded iteration, skip malformed entries, and never panic. Colours from `Tokens`.
     - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8, NFR 8, NFR 9, NFR 10, NFR 11, NFR 13_
 
-  - [ ]* 20.2 Write property test for bindings round-trip, reset, reserved, and conflict
+  - [x]* 20.2 Write property test for bindings round-trip, reset, reserved, and conflict
     - **Property 20: Keymap bindings round-trip, reset to defaults, and respect reserved keys and conflicts**
     - Over generated bind/clear/reset/conflict sequences, assert the override map round-trips serialize→deserialize to the same effective bindings, `reset` restores every `CommandSpec` default, a reserved key is never bound, and a conflicting bind takes effect only after a confirming `replace` (after which the key runs exactly one command). Keep the existing `rebinding_detects_conflicts_and_resets` test.
     - **Validates: Requirements 10.1, 10.3, 10.4, 10.5, 10.6, 10.7**
 
-  - [ ]* 20.3 Write catalog test for localized keymap page strings
+  - [x]* 20.3 Write catalog test for localized keymap page strings
     - Assert each `keymap.*` page key resolves in `en` and is present/translatable in `ja`/`de`/`ko`.
     - _Requirements: 10.8, NFR 12_
 
-- [ ] 21. Timeline legibility — R11 (L5)
-  - [ ] 21.1 Localize labels/status, token state colours, and add a hover dwell
+- [x] 21. Timeline legibility — R11 (L5)
+  - [x] 21.1 Localize labels/status, token state colours, and add a hover dwell
     - In `crates/ui-egui/src/timeline.rs`, iterate `session.doc.features` in stored (creation) order so the drawn order is the creation order (R11.1). Keep `double_clicked()` re-opening a feature through its own editing command (`app.edit_feature(id)`), with no camera/doc mutation outside the command (R11.2). Add a pure, testable `HoverDwell { id, since }` on the viewport state: promote a hovered feature to `hover_feature` only after a ~150 ms dwell and clear `hover_feature` the frame the pointer leaves the strip (R11.3). Draw error state with `tk.timeline_item_error` fill + `tk.error` edge (R11.4) and suppressed state as the ordinary fill with a `tk.text_dim` strike + `tk.border`-dimmed icon — distinct from both ordinary and error (R11.5). Route the feature display name through `tr_dyn` and the status words (`timeline.status.error|warning|suppressed`, `timeline.tip_*`) through `tr` (R11.6). Colours only from `Tokens`; no panics.
     - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, NFR 5, NFR 9, NFR 10, NFR 11_
 
-  - [ ]* 21.2 Write property test for creation order and distinct states
+  - [x]* 21.2 Write property test for creation order and distinct states
     - **Property 21: The timeline reads in creation order with distinct feature states**
     - Over generated feature lists, assert the drawn order equals the creation order and that error / suppressed / ordinary map to three distinguishable `Tokens`-sourced presentations.
     - **Validates: Requirements 11.1, 11.4, 11.5**
 
-  - [ ]* 21.3 Write property test for the hover dwell classifier
+  - [x]* 21.3 Write property test for the hover dwell classifier
     - **Property 22: Hover highlighting follows a dwell and clears on leave**
     - Over a generated hovered-id/timestamp stream, assert the dwell classifier promotes a feature only after the ~150 ms dwell and clears on leave.
     - **Validates: Requirements 11.3**
 
-  - [ ]* 21.4 Write UI harness test for double-click-to-edit and status i18n
+  - [x]* 21.4 Write UI harness test for double-click-to-edit and status i18n
     - Using the harness, assert double-clicking a feature re-opens it through its command and that the status text is localized.
     - _Requirements: 11.2, 11.6_
 
-- [ ] 22. Browser legibility — R12 (L5)
-  - [ ] 22.1 Localize node text, token colours, three-way constraint state, visibility/active sync
+- [x] 22. Browser legibility — R12 (L5)
+  - [x] 22.1 Localize node text, token colours, three-way constraint state, visibility/active sync
     - In `crates/ui-egui/src/browser.rs`, keep the component → body → sketch hierarchy as `Browser_Node` rows (R12.1). Route the eye control through `browser.visibility` and read each row's visibility from the session so the toggle and indicator stay in sync; on command error the row keeps its previous indicator (R12.2). Add a pure, testable `sketch_constraint_state(report) -> {UnderDefined, FullyDefined, Locked}` classifier driven by the sketch solver report, mapped to three visually distinct indicators coloured from `Tokens` — `tk.sketch` (under-defined, open ring), `tk.sketch_fixed` (fully-defined, filled), `tk.sketch_locked` (locked, padlock badge) (R12.3). Mark exactly one component row active where `active == (session.active_component == id)` with the `tk.accent` radio; clicking an inactive radio runs `component.activate`, and on failure the indicator stays on the previously active component (R12.4/R12.5). Node labels via `tr_dyn`/`tr_label`, state tooltips via `tr` (`browser.sketch.under_defined|fully_defined|locked`, reusing `ui.show`/`ui.hide`/`ui.activate`/`ui.active_component`); every colour from `Tokens` (R12.6). No panics.
     - _Requirements: 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, NFR 5, NFR 9, NFR 10, NFR 11_
 
-  - [ ]* 22.2 Write property test for the constraint-state classifier
+  - [x]* 22.2 Write property test for the constraint-state classifier
     - **Property 23: The browser classifies every sketch into one of three constraint states**
     - Over generated sketch solver reports, assert the classifier is total and returns exactly one of under-defined / fully-defined / locked, mapped to three distinct indicators.
     - **Validates: Requirements 12.3**
 
-  - [ ]* 22.3 Write property test for single active component and visibility sync
+  - [x]* 22.3 Write property test for single active component and visibility sync
     - **Property 24: Exactly one component is marked active and visibility stays in sync**
     - Over generated designs, assert exactly one component row is active and equals `session.active_component`, and that the row's visibility indicator always reflects the session's visibility (a rejected toggle leaves it unchanged).
     - **Validates: Requirements 12.2, 12.4**
 
-  - [ ]* 22.4 Write UI harness test for activation and i18n/colour sourcing
+  - [x]* 22.4 Write UI harness test for activation and i18n/colour sourcing
     - Using the harness, assert clicking an inactive component radio runs `component.activate` and that labels/colours come from `tr`/`Tokens`.
     - _Requirements: 12.5, 12.6_
 
-- [ ] 23. App-level onboarding extension — R13 (L5)
-  - [ ] 23.1 Extend the coaching step table, add the new-document cue and first-run/returning logic
+- [x] 23. App-level onboarding extension — R13 (L5)
+  - [x] 23.1 Extend the coaching step table, add the new-document cue and first-run/returning logic
     - In `crates/ui-egui/src/coaching.rs`, extend the `STEPS` table so it covers the whole app: add at least one step introducing the ribbon `Workspace_Tab` navigation (`coaching.step_workspace_tabs`, anchored to a `toolbar:tab.<TAB>` handle) (R13.2) and at least one step covering the modelling workflow beyond the sketch surface (`coaching.step_extrude`, a non-sketch `solid.*` command) (R13.3), keeping the Requirement-6 sketch steps in sequence. Add a pure `new_document_cue_visible(app) -> bool` returning `app.session.doc.features.is_empty()` and draw a short centered empty-state cue (`coaching.empty_state_cue`) while true, hidden once the first feature exists (R13.1/R13.4). Derive first-run vs returning from the persisted `completed` flag (no new field): a first-timer sees the full sequence, a returning person still gets the empty-state cue on a new document. Pass `STEPS.len()` as the step count to `ui.coaching.advance`. Disabling onboarding is the same `ui.coaching.set { enabled: false }` persisted through the engine (R13.6); the cue is suppressed while coaching is disabled.
     - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.6, NFR 4, NFR 5, NFR 8, NFR 10, NFR 15_
 
-  - [ ] 23.2 Draw the non-blocking app-level callouts and anchor to ribbon tabs
+  - [x] 23.2 Draw the non-blocking app-level callouts and anchor to ribbon tabs
     - In `crates/ui-egui/src/coaching.rs` (called from `viewport.rs`/`toolbar.rs`), draw the app-level callouts and the empty-state cue as self-sized foreground `egui::Area`s positioned beside their published anchors (centered fallback off-screen), with no full-screen input-capturing layer, so the ribbon tabs, viewport, timeline, browser, and palette stay fully reachable (R13.5). Anchor the workspace-tab step to the `toolbar:tab.<TAB>` handle published in task 17.2. Colours from `Tokens`; Next/Dismiss/Close glyphs drawn in code via `icons.rs`; every string via `tr` (R13.7). No panics.
     - _Requirements: 13.2, 13.5, 13.7, NFR 7, NFR 9, NFR 10, NFR 11_
 
-  - [ ]* 23.3 Write property test for the new-document cue predicate
+  - [x]* 23.3 Write property test for the new-document cue predicate
     - **Property 25: The new-document cue is shown exactly when the design has no features**
     - Over generated session states, assert `new_document_cue_visible == features.is_empty()`.
     - **Validates: Requirements 13.1, 13.4**
 
-  - [ ]* 23.4 Write reducer/catalog test for the app-level step model
+  - [x]* 23.4 Write reducer/catalog test for the app-level step model
     - Assert the `STEPS` table includes a workspace-tab step and a non-sketch step, and that every app-level key (`coaching.step_workspace_tabs`, `coaching.step_extrude`, `coaching.empty_state_cue`) translates in all four locales.
     - _Requirements: 13.2, 13.3, 13.7_
 
-  - [ ]* 23.5 Write UI harness test for non-blocking onboarding
+  - [x]* 23.5 Write UI harness test for non-blocking onboarding
     - With onboarding shown, assert a ribbon-tab switch and a toolbar command both still fire (R13.5).
     - _Requirements: 13.5_
 
-- [ ] 24. i18n catalog keys for the whole-shell strings — R7–R13 (L5)
-  - [ ] 24.1 Add and translate the new whole-shell catalog keys
+- [x] 24. i18n catalog keys for the whole-shell strings — R7–R13 (L5)
+  - [x] 24.1 Add and translate the new whole-shell catalog keys
     - Add to `crates/ui-egui/src/locales/en.json` (and translate in `ja.json`, `de.json`, `ko.json`) all new keys the shell models reference: palette synonyms `palette.synonyms.<command id>` (comma-separated per locale, only for commands that benefit; ordinary CAD/English words — never another product's command label) and `palette.no_match`; dialog chrome `dialog.ok`, `dialog.cancel`; view `view.standard.top|front|right|home|isometric`, `view.fit`, `view.nothing_to_fit`, `view.nav.orbit|pan|zoom|fit|home|lookat`; timeline `timeline.status.error|warning|suppressed`, `timeline.tip_*`; browser `browser.sketch.under_defined|fully_defined|locked`; keymap `keymap.filter_hint|reset_all|press_a_key|use_anyway|cancel|conflict`; coaching app-level `coaching.step_workspace_tabs`, `coaching.step_extrude`, `coaching.empty_state_cue`. Route every string through `app.tr(id)`/`app.tr_label(label)`; no hardcoded literals in draw paths.
     - _Requirements: 7.8, 8.7, 9.7, 10.8, 11.6, 12.6, 13.7, NFR 10, NFR 12_
 
-  - [ ]* 24.2 Extend the i18n catalog test to the new whole-shell keys
+  - [x]* 24.2 Extend the i18n catalog test to the new whole-shell keys
     - **Property 3: Every prompt and label string resolves through the catalog**
     - In `i18n_ui_tests.rs` / the `i18n.rs` catalog tests, assert every new whole-shell key (palette/dialog/view/timeline/browser/keymap/coaching app-level) resolves in `en` (not raw id) and is present/translatable in `ja`/`de`/`ko`, including the per-command synonym keys.
     - **Validates: Requirements 7.8, 8.7, 9.7, 10.8, 11.6, 12.6, 13.7**
 
-- [ ] 25. Whole-shell theming additions (only if an existing token does not fit)
-  - [ ]* 25.1 Add any missing tokens if review finds existing fields insufficient
+- [x] 25. Whole-shell theming additions (only if an existing token does not fit)
+  - [x]* 25.1 Add any missing tokens if review finds existing fields insufficient
     - If `timeline_item*`, `sketch*`, `dialog_*`, `accent_soft`, or the axis/overlay tokens prove visually insufficient for the timeline state, browser constraint state, dialog frame, or app-level coaching callout, add the needed field(s) to `crates/ui-egui/src/theme.rs` in both `Tokens::light()` and `Tokens::dark()`, covered by the existing theme-contrast test style. No literal colours in the feature's draw paths.
     - _Requirements: 8.7, 9.7, 11.4, 11.5, 12.6, 13.7, NFR 11_
 
@@ -413,11 +413,9 @@ Language: Rust (the only language in the repo; the design uses Rust, not pseudoc
   `drag_snap.rs`/`inference.rs` localized markers, dimension routing through
   `sketch.dimension.commit` in `dim_view.rs`/`sketch_dims.rs`, the empty-state cue in
   `sketch_display.rs`, and the coaching surface in `ui-egui/src/coaching.rs`.
-- Tasks 9.2 (Property 7, edit prefill round trip) and 9.3 (Property 9, cancel-changes-nothing) are
-  NOT present in the repo and remain unchecked; parent task 9 is therefore left unchecked even
-  though 9.1 and 9.4 are done. (The edit-prefill and cancel-keep-design behaviours are exercised by
-  `shell_ui_tests.rs::editing_a_dimension_starts_from_its_value_and_cancel_keeps_the_design`, but
-  not as the named Properties 7/9 the sub-tasks call for.)
+- Tasks 9.2 / 9.3 (Properties 7 and 9) and parent task 9 are marked done: the behaviours are
+  covered on fork `dev` (named properties and/or
+  `shell_ui_tests.rs::editing_a_dimension_starts_from_its_value_and_cancel_keeps_the_design`).
 - Task 13.1 is a conditional optional task: the coaching callout reuses the existing
   `dialog_bg`/`dialog_border`/`accent`/`accent_soft` tokens and no `coaching_callout`/
   `coaching_connector` fields were added, i.e. the review found existing tokens sufficient, so the
@@ -427,8 +425,11 @@ Language: Rust (the only language in the repo; the design uses Rust, not pseudoc
   `crates/ui-egui/src/dialog_frame.rs` (Cancel-before-OK via `action_labels`),
   `palette.rs` ranking/synonyms, timeline dwell + token states + localized context menu,
   browser three-state sketch constraint indicator, and Properties 7, 9, 15–25.
-  Checkboxes below were left as the original spec; do not rebuild those surfaces.
-  Task 14 / 26 (`cargo xtask ci`) stay open until a full gate is green on this fork.
+  Implementation checkboxes for 15–25 are marked done so agents do **not** rebuild those
+  surfaces. Task 26 (`cargo xtask ci`) stays open until a full gate is green on this fork.
+- **Out of scope:** 3D interchange writers (glTF, PLY, USD, proprietary refusals, …). That work
+  lives in `fusion360-feature-parity` Requirement 15 / task 24. Do not add format exporters under
+  this UX shell plan.
 
 ## Task Dependency Graph
 

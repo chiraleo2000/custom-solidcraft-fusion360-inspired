@@ -1,6 +1,6 @@
 [package]
 name = "solidcraft-io"
-description = "SolidCraft file formats: designs (JSON), STL, OBJ, STEP and 3MF"
+description = "SolidCraft file formats: designs (JSON), STEP/IGES, STL/OBJ/MTL/3MF, glTF/GLB, PLY, AMF, COLLADA, X3D, VRML, VRM, USDA"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

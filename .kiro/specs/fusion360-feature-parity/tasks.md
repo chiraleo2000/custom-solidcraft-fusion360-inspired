@@ -31,10 +31,28 @@ Property tags: each property test references its design property as
 
 ## Reconciliation (2026-10-22, fork `dev`)
 
-The command surface for Stages 1–6, mold, and DfAM is already on this branch
-(`docs/features.md`, engine `cmd/*`). Unchecked boxes below were written before that
-work and are **not** a queue to rebuild those commands. Do not reimplement `surface.*`,
-`form.*`, `mesh.*`, `drawing.*`, `cam.*`, `sim.*`, `render.*`, `ecad.*`, or `mold.*`.
+The command surface for Stages 1–6, mold, and DfAM is **confirmed registered** against the
+current `docs/features.md` (479 commands) and engine `cmd/*` — verified, not assumed. The key
+id families this plan references all already exist on this branch: `surface.offset` /
+`surface.rule` (plus `surface.flatten`, `surface.reverse`); the full `form.*` edit set
+(`form.edit_point`, `form.insert_edge`, `form.insert_point`, `form.subdivide`, `form.bridge`,
+`form.weld`, `form.crease`, `form.uncrease`, `form.symmetry`, `form.extrude_face`, `form.finish`,
+`form.thicken`, `form.match`); `mesh.remesh` / `mesh.deviation` (plus `mesh.smooth`, `.separate`,
+`.combine`, `.merge_groups`, `.shell`, `.reverse`); the `ui.*` / `view.*` shell commands
+(`ui.quick_toolbox`, `ui.repeat_last`, `ui.context_menu`, `ui.select_depth`, `ui.select_filter`,
+`view.orient`, `view.visual_style`, `view.component_colors`, `view.select_mode`); the full
+`mold.*` and `dfam.*` sets; and the later-stage surfaces `drawing.*` (19), `cam.*` (30), `sim.*`
+(12), `generative.*` (3), `render.*` (3), `anim.*` (4), and `ecad.*` (8).
+
+Because every referenced command already exists, the unchecked boxes below do **not** track
+"does the command exist." They track the remaining **deepening** and **test/evidence**
+obligations for each capability: seed-to-parity depth, property / oracle / hostile-param-fuzz
+tests, control-channel screenshot evidence, and the never-crash discipline. An unchecked box must
+never be read as "command missing" or as a signal to re-register or rebuild an existing command.
+
+Do not reimplement `surface.*`, `form.*`, `mesh.*`, `drawing.*`, `cam.*`, `sim.*`, `render.*`,
+`ecad.*`, or `mold.*`; the `mesh.*` and the `view.*` / `ui.*` shell families are likewise already
+registered and must not be rebuilt. These are a hard do-not-rebuild list, not a queue.
 Still deferred: PCB autorouting and a cloud renderer.
 
 ## Tasks
@@ -408,7 +426,7 @@ Still deferred: PCB autorouting and a cloud renderer.
       **no GPL packer**); guard every kernel call; cap packing/body counts before allocating;
       hostile/finite checks on all parameters
     - _Requirements: 14.5, 14.6 · design Stage-3-adjacent_
-  - [ ]* 23.5 Property + hostile-param fuzz for the mold/DfAM track
+  - [x]* 23.5 Property + hostile-param fuzz for the mold/DfAM track
     - **Feature: fusion360-feature-parity, Property 28 (later-phase): mold cavity volume equals the
       prototype volume with Keep Tools preserving the tool; a split union equals the pre-split mold;
       nested bodies are non-overlapping and within bounds** — **Validates: 14.7**
@@ -418,6 +436,41 @@ Still deferred: PCB autorouting and a cloud renderer.
     `Nesting`) and the Combine `keep_tools` field use `#[serde(default)]` so `solidcraft-container/1`
     round-trips; `mold_box`/`pack_bodies` and every other kernel call route through
     `solidcraft_kernel::guard`; body, pin, and packing counts are capped before any kernel call.
+
+---
+
+### Stage 2 — 3D interchange export (Requirement 15 · design "Stage 2 — 3D interchange export") · later-phase
+
+> Do **not** rebuild STEP/IGES/3MF/STL/OBJ/`file.export` — they already ship and are covered by
+> `crates/engine/src/export_formats_tests.rs`. These tasks add public-spec writers beside them and
+> **refuse** proprietary vendor formats (Requirement 15.7 / Requirement 1.5).
+
+- [x]* 24. Public-specification 3D export writers in `crates/io`
+  - [x]* 24.1 OBJ companion MTL + `Format` extensions for tessellated public formats
+    - Extend `crates/io/src/lib.rs` `Format` / `Format::from_name` / `export` for `.mtl` (written
+      beside OBJ with Wavefront `mtllib`/`usemtl`, colours from appearances), `.gltf`, `.glb`,
+      `.ply`, `.amf`, `.dae`, `.x3d`, `.wrl`/`.vrml`, and `.vrm` (glTF-based); reuse `export_mesh`;
+      cap triangle counts; pure Rust so `cargo xtask wasm` stays green; wire through existing
+      `file.export` / CLI / MCP `export` (no new modelling command id unless params demand it)
+    - _Requirements: 15.1, 15.2, 15.3, 15.5, 15.6 · design Stage 2 interchange_
+  - [x]* 24.2 Refuse proprietary vendor formats with clear errors
+    - Ensure `Format::from_name` / `file.export` reject `.fbx`, `.blend`, `.max`, `.c4d`, `.ma`/
+      `.mb`, `.dwg`, `.skp`, `.sldprt`/`.sldasm`, `.f3d`, `.ipt`/`.iam`, `.sat`, `.x_t`/`.x_b` with
+      an unsupported-format error that names the public equivalent (glTF or STEP); never link a
+      proprietary SDK or read GPL sources; export UI lists only public formats
+    - _Requirements: 15.7, 1.5 · design Stage 2 interchange (explicit refusals)_
+  - [x]* 24.3 OpenUSD export (ASCII first, then binary/package as bindings allow)
+    - Add `.usda` (then `.usd`/`.usdc`/`.usdz`) via OpenUSD public spec or an openly licensed
+      non-GPL path; on wasm or missing native deps return `"not supported yet: …"` rather than
+      breaking the wasm build
+    - _Requirements: 15.4, 15.5, 15.6 · design Stage 2 interchange (OpenUSD)_
+  - [x]* 24.4 Round-trip / structural tests + hostile export fuzz
+    - Extend `crates/engine/src/export_formats_tests.rs` and `crates/io` unit tests for each new
+      writer; assert proprietary extensions error and write no file; empty selection → `Err`
+    - **Property 29 (later-phase): Public interchange exports are structurally sound; proprietary
+      formats are refused** — **Validates: 15.1–15.4, 15.6–15.8**
+    - **Property 1** over `file.export` with hostile paths/formats/body lists — **Validates: 15.6**
+      (≥100 inputs)
 
 ---
 
@@ -450,6 +503,10 @@ Still deferred: PCB autorouting and a cloud renderer.
   `ATTRIBUTION.md` row (`cargo xtask assets`).
 - `cargo xtask ci` must be green before every commit; `cargo xtask features` + `ROADMAP.md` are
   updated whenever commands are added.
+- 3D interchange (task 24) is Stage-2 / `*`-optional like drawings: it deepens `crates/io` only,
+  reuses existing tessellation, and **excludes** proprietary vendor formats (FBX, BLEND, MAX, C4D,
+  Maya, DWG, SKP, SolidWorks, Fusion `.f3d`, Inventor, ACIS SAT, Parasolid) per Requirement 1.5 —
+  the independent equivalents are glTF/GLB or STEP.
 
 ## Task Dependency Graph
 
@@ -461,9 +518,9 @@ Still deferred: PCB autorouting and a cloud renderer.
     { "id": 2, "tasks": ["1.3", "1.4", "2.1", "2.2", "3.2", "5.2", "6.2", "7.2", "10.2", "11.2", "13.1"] },
     { "id": 3, "tasks": ["2.5", "2.6", "3.3", "6.3", "7.3", "9.3", "10.3", "11.3", "13.7", "13.8", "14.1"] },
     { "id": 4, "tasks": ["7.4", "14.2", "14.4", "15.1"] },
-    { "id": 5, "tasks": ["14.3", "15.2", "17.1", "18.1", "19.1", "20.1", "21.1", "23.1"] },
-    { "id": 6, "tasks": ["17.2", "17.3", "18.2", "19.2", "20.2", "21.2", "23.2"] },
-    { "id": 7, "tasks": ["17.4", "18.3", "19.3", "20.3", "21.3", "22.1", "22.2", "23.3", "23.4"] },
+    { "id": 5, "tasks": ["14.3", "15.2", "17.1", "18.1", "19.1", "20.1", "21.1", "23.1", "24.1", "24.2"] },
+    { "id": 6, "tasks": ["17.2", "17.3", "18.2", "19.2", "20.2", "21.2", "23.2", "24.3"] },
+    { "id": 7, "tasks": ["17.4", "18.3", "19.3", "20.3", "21.3", "22.1", "22.2", "23.3", "23.4", "24.4"] },
     { "id": 8, "tasks": ["23.5"] }
   ]
 }

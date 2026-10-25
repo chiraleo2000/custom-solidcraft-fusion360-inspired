@@ -1,4 +1,6 @@
-# Requirements — Fusion 360 Feature Parity
+# Requirements Document
+
+**Fusion 360 Feature Parity**
 
 ## Introduction
 
@@ -12,15 +14,24 @@ SolidCraft reaches each capability through its own independent design derived fr
 documentation, general CAD conventions, analytic reference values, and open-source tools. The
 plan is a direction of travel, not a commitment to replicate Fusion exactly.
 
-### Current baseline (as of ROADMAP 2026-10-11)
+### Current baseline (as of ROADMAP 2026-10-22)
 
 - **At or near parity today:** sketching with a constraint solver and the full sketch
   create/modify set and 13-plus constraints; solid modelling (extrude with 5 operations,
   revolve, sweep, loft including loft-to-point, hole with cosmetic and modelled threads,
   press/pull, fillet/chamfer, shell, draft, mirror, pattern, split); parameters and
   configurations; components and assemblies with 7 joint types, motion studies, exploded views,
-  and interference; sheet metal; a plastic enclosure subset; file I/O (STEP/IGES/3MF/STL/OBJ/DXF);
-  a thin contextual UI with a parametric timeline; desktop + browser (wasm) + CLI + MCP.
+  and interference; sheet metal; a plastic enclosure subset; file I/O already shipping
+  STEP/STP, IGES/IGS, 3MF, STL (binary + ASCII), OBJ, DXF, SVG/PDF (drawings), Gerber (ECAD),
+  and the native `.solidcraft` container; a thin contextual UI with a parametric timeline;
+  desktop + browser (wasm) + CLI + MCP. Mesh/scene formats beyond that set (glTF/GLB, PLY,
+  USD, COLLADA, …) and any proprietary vendor formats are covered by Requirement 15.
+- **Already-covered conveniences (no new work).** The teardown highlights two interaction
+  techniques that SolidCraft's existing solid set already provides, tracked here only for
+  traceability: Press/Pull as the unified extrude / offset-face / fillet tool (one gesture that
+  dispatches to the appropriate existing solid command), and the revolve-cut technique used to
+  produce circular chamfers. Both are already part of the solid set; neither adds a new
+  requirement.
 - **Seeded but shallow (partial command sets exist and need deepening):** Surface
   (`surface.*` — patch/stitch/thicken/trim/extrude/revolve), Form/T-splines (`form.*` — a 4×4
   grid seed), Mesh reverse-engineering (`mesh.*` — convert/section/plane-cut/repair/reduce/face
@@ -68,8 +79,8 @@ restated once here and are treated as implicit acceptance criteria on all featur
 | Stage | Theme | Scope |
 |---|---|---|
 | **Stage 1 — Close the design-workspace gap** | Make the Design workspace feel complete | Surface workspace depth, Form/T-splines, Mesh reverse-engineering, UI-shell parity (S-toolbox, marking menu, ViewCube semantics, selection modes/filters, visual styles) |
-| **Stage 2 — Documentation & data out** | Communicate and hand off designs | 2D Drawings depth (views, dimensioning, annotation, parts list/BOM, title block, standards) |
-| **Stage 3 — Downstream manufacturing** | From model to machine | Manufacture/CAM depth (setups/WCS/stock, 2D+3D toolpaths, hole recognition, G-code) |
+| **Stage 2 — Documentation & data out** | Communicate and hand off designs | 2D Drawings depth (views, dimensioning, annotation, parts list/BOM, title block, standards); 3D interchange export of public-specification formats (Requirement 15) |
+| **Stage 3 — Downstream manufacturing** | From model to machine | Manufacture/CAM depth (setups/WCS/stock, 2D+3D toolpaths, hole recognition, G-code); mold design & design-for-additive-manufacturing (DfAM) as a Stage 3-adjacent manufacturing track (Requirement 14) |
 | **Stage 4 — Analysis & generation** | Validate and explore designs | Simulation (FEA) and Generative Design foundations |
 | **Stage 5 — Presentation** | Show the design | Render (PBR) and Animation (storyboard + published video) |
 | **Stage 6 — Electronics** | ECAD | Schematic / PCB / 3D PCB, ERC/DRC |
@@ -78,11 +89,46 @@ Stages are ordered by priority and dependency. Each stage is independently shipp
 stages may be re-prioritized by the owner. Every requirement names the Fusion workspace or
 workflow it traces to.
 
+Mold design and DfAM (Requirement 14) sit in a Stage 3-adjacent manufacturing track: they build
+on existing solid/boolean capabilities rather than on CAM toolpaths, so Requirement 14 is
+independently shippable and does not block or depend on the rest of Stage 3.
+
+3D interchange export (Requirement 15) sits in Stage 2 ("data out"): it deepens `crates/io`
+and `file.export` using the existing tessellation / B-rep export path. Near-term mesh/scene
+writers are independently shippable from drawings depth; the USD family may land later inside
+the same requirement. Proprietary vendor formats are **explicitly excluded** with recorded
+reasons (Requirement 1.5) — SolidCraft never reverse-engineers or copies commercial CAD
+product formats.
+
+---
+
+## Glossary
+
+- **Parity**: Equivalent user-facing capability and workflow to the reference, not imitation of its code, ids, or assets.
+- **Clean-room / Independent**: Behaviour designed solely from public documentation and general CAD conventions, with nothing copied from a commercial CAD product.
+- **Seed**: A shallow, partial command set that already exists and is to be deepened rather than built greenfield.
+- **BRep**: Boundary-representation solid or surface geometry defined by faces, edges, and vertices.
+- **T-spline / Form cage**: The editable control-cage geometry of the Form environment used to sculpt smooth freeform bodies.
+- **Guarded kernel call**: A call into the third-party geometry kernel routed through `solidcraft_kernel::guard`, which turns a kernel panic into a recoverable error.
+- **CommandSpec**: The registry entry in `crates/engine/src/cmd/*` defining a user-visible command (id, label, placement, icon, shortcut, params, `enabled`, JSON `run`).
+- **Timeline feature**: A parametric operation recorded on the document timeline so it can be re-evaluated and edited.
+- **FEA**: Finite element analysis, the structural solve underlying the Simulation workspace.
+- **ERC**: Electrical-rule check that reports schematic connectivity issues without modifying the schematic.
+- **DRC**: Design-rule check that reports PCB clearance and width violations.
+- **DfAM**: Design for additive manufacturing, covering print-oriented clearances and part layout.
+- **WCS**: Work coordinate system that orients a machining setup.
+- **Public-specification format**: A file format defined by a published open standard or
+  openly documented specification that SolidCraft may implement clean-room (ISO STEP/IGES,
+  Khronos glTF, ASTM AMF, Pixar OpenUSD, Wavefront OBJ, …). Proprietary vendor scene/CAD
+  formats without a usable public write specification are out of scope.
+- **Tessellated export**: An export path that writes triangle (or polygon) mesh data produced
+  by the existing guarded kernel tessellation, as opposed to exact B-rep exchange (STEP/IGES).
+
 ---
 
 ## Requirements
 
-### Requirement 1 — Staged, traceable parity plan (meta)
+### Requirement 1: Staged, traceable parity plan (meta)
 
 **User Story:** As a SolidCraft maintainer, I want the parity effort organized into prioritized
 stages traceable to Fusion's workspaces and standard workflows, so that progress is reviewable,
@@ -108,7 +154,7 @@ each increment ships value, and no capability is silently dropped.
 
 ---
 
-### Requirement 2 — UI-shell parity (Design workspace shell) · Stage 1
+### Requirement 2: UI-shell parity (Design workspace shell) · Stage 1
 
 **User Story:** As a user coming from Fusion, I want SolidCraft's interactive shell to offer the
 same fast interaction model — an on-canvas quick-access toolbox, a right-click action menu, a
@@ -141,10 +187,34 @@ work without hunting through menus.
    colours from `theme::Tokens`), keeping `crates/ui-egui` swappable.
 8. IF a shell action targets an entity that no longer exists or is invalid THEN the system SHALL
    report an error and leave the model and any pending input unchanged, never panicking.
+9. WHEN the user picks a window selection mode and drags a box left-to-right THEN the system
+   SHALL select only entities fully enclosed by the box, and WHEN the user drags the box
+   right-to-left THEN the system SHALL select entities that the box encloses or crosses, resolved
+   deterministically from the drag direction.
+10. WHEN the user picks the freeform/lasso selection mode and drags a closed freeform region
+    THEN the system SHALL select entities inside that region deterministically.
+11. WHEN the user picks the paint selection mode and drags the cursor across faces or edges THEN
+    the system SHALL add each face or edge the cursor passes over to the selection
+    deterministically.
+12. WHEN the user presses and holds over overlapping geometry THEN the system SHALL present a
+    chooser of the stacked profile, face, edge, and body candidates ordered by sorted depth,
+    without first hiding any bodies.
+13. WHEN the user chooses a visual style THEN the system SHALL offer exactly four named styles —
+    Shaded, Shaded with hidden edges, Shaded with visible edges only, and Wireframe — with the
+    three wireframe sub-variants treated as one Wireframe style family.
+14. WHEN the user switches the visual style THEN the system SHALL treat the change as a view-only
+    setting that is not recorded on the undo stack and is not serialized with the design.
+15. WHEN the user toggles component color cycling THEN the system SHALL display each component in
+    a distinct color in the viewport and in the browser/timeline, without changing the model
+    geometry or the assigned appearances.
+
+> Clean-room note: none of these interactions copy Fusion's icons, command ids, tooltips, or
+> keyboard shortcuts. SolidCraft uses its own dotted lower-case command ids and code-drawn icons
+> throughout.
 
 ---
 
-### Requirement 3 — Surface workspace depth (Surface) · Stage 1
+### Requirement 3: Surface workspace depth (Surface) · Stage 1
 
 **User Story:** As a user modelling complex shapes, I want zero-thickness surface tools —
 extrude/revolve/sweep/loft as surfaces plus patch, trim, untrim, stitch, and thicken — so I can
@@ -173,7 +243,7 @@ build and repair geometry that pure solid tools can't express, then convert it t
 
 ---
 
-### Requirement 4 — Freeform / T-spline modelling (Form) · Stage 1
+### Requirement 4: Freeform / T-spline modelling (Form) · Stage 1
 
 **User Story:** As an industrial designer, I want a Form environment to sculpt organic shapes
 from editable control geometry — create a form primitive, pull/edit control points, insert edges,
@@ -197,7 +267,7 @@ subdivide, bridge, crease, and mirror with symmetry — then finish it into a so
 
 ---
 
-### Requirement 5 — Mesh reverse-engineering (Mesh) · Stage 1
+### Requirement 5: Mesh reverse-engineering (Mesh) · Stage 1
 
 **User Story:** As a user with a scanned or downloaded mesh, I want to import it, inspect it,
 section it into sketches, clean it up, and convert it to editable BRep geometry, so I can
@@ -224,7 +294,7 @@ rebuild a parametric model and compare deviation against the original.
 
 ---
 
-### Requirement 6 — 2D Drawings depth (Drawing) · Stage 2
+### Requirement 6: 2D Drawings depth (Drawing) · Stage 2
 
 **User Story:** As an engineer preparing manufacturing documentation, I want to produce 2D
 drawing sheets with base/projected/section/detail views, dimensions and annotations, a title
@@ -252,7 +322,7 @@ can hand off a complete drawing.
 
 ---
 
-### Requirement 7 — Manufacture / CAM depth (Manufacture) · Stage 3
+### Requirement 7: Manufacture / CAM depth (Manufacture) · Stage 3
 
 **User Story:** As a machinist, I want to define a setup (WCS, stock), generate 2D and 3D
 toolpaths with hole recognition, simulate material removal, and post-process to G-code, so I can
@@ -278,7 +348,7 @@ machine the modelled part.
 
 ---
 
-### Requirement 8 — Simulation foundations (Simulation) · Stage 4
+### Requirement 8: Simulation foundations (Simulation) · Stage 4
 
 **User Story:** As an engineer, I want to set up a structural study with constraints and loads,
 solve it, and view stress/displacement results, so I can check a design before manufacturing.
@@ -298,7 +368,7 @@ solve it, and view stress/displacement results, so I can check a design before m
 
 ---
 
-### Requirement 9 — Generative Design foundations (Generative Design) · Stage 4
+### Requirement 9: Generative Design foundations (Generative Design) · Stage 4
 
 **User Story:** As a designer, I want to define preserve/obstacle regions, loads, and goals and
 explore generated geometry options, so I can discover lightweight shapes.
@@ -316,7 +386,7 @@ explore generated geometry options, so I can discover lightweight shapes.
 
 ---
 
-### Requirement 10 — Render (Render) · Stage 5
+### Requirement 10: Render (Render) · Stage 5
 
 **User Story:** As a user presenting a design, I want to apply physically based appearances and
 scene lighting and produce a rendered image, so I can communicate the look of the product.
@@ -335,7 +405,7 @@ scene lighting and produce a rendered image, so I can communicate the look of th
 
 ---
 
-### Requirement 11 — Animation (Animation) · Stage 5
+### Requirement 11: Animation (Animation) · Stage 5
 
 **User Story:** As a user documenting assembly, I want a storyboard timeline with automatic and
 manual exploded steps and component motion, and the ability to publish a video, so I can show how
@@ -356,7 +426,7 @@ a product goes together.
 
 ---
 
-### Requirement 12 — Electronics / PCB (Electronics) · Stage 6
+### Requirement 12: Electronics / PCB (Electronics) · Stage 6
 
 **User Story:** As a user designing an enclosure for electronics, I want schematic capture, PCB
 layout with design-rule checks, and a 3D PCB usable in the mechanical assembly, so I can
@@ -378,7 +448,7 @@ co-design board and enclosure.
 
 ---
 
-### Requirement 13 — Standard-workflow validation (cross-workspace) · all stages
+### Requirement 13: Standard-workflow validation (cross-workspace) · all stages
 
 **User Story:** As a maintainer, I want each of Fusion's standard end-to-end workflows to be
 exercisable in SolidCraft through the command/control layer, so parity is validated by complete
@@ -401,3 +471,115 @@ workflows rather than isolated commands.
    recording from a small public-safe reproduction driven through the control channel.
 6. WHEN any workflow runs THEN no step SHALL panic; unsupported steps SHALL return
    `"not supported yet: …"` and leave the design in a consistent state.
+7. WHEN the reference-canvas spline-revolve workflow is run (insert and calibrate a reference
+   canvas image on a plane at 1:1 scale → sketch a centerline and a fit-point spline profile →
+   revolve 360° about the axis → shell to a wall thickness → assign a transparent appearance)
+   THEN each step SHALL complete through registered commands, and the sketch SHALL reach a
+   fully-defined state before the revolve step runs.
+8. WHEN the mold-design workflow is run (model a prototype → create a mold box → Combine (Cut)
+   with Keep Tools to form the cavity → split into a two-part mold with alignment pins and a pour
+   spout) THEN each step SHALL complete through registered commands, no step SHALL panic, and an
+   unsupported step SHALL return `"not supported yet: …"`.
+
+---
+
+### Requirement 14: Mold design & design-for-additive-manufacturing (DfAM) · Stage 3-adjacent
+
+**User Story:** As a user preparing parts for casting or 3D printing, I want mold-cavity creation
+and print-oriented clearances, so that I can produce a mold from a prototype body and lay out
+printable parts with correct fit.
+
+#### Acceptance Criteria
+
+1. WHEN the user runs the mold-box command on a prototype body THEN the system SHALL create a
+   mold box body that fully encloses the prototype body.
+2. WHEN the user runs a boolean Combine (Cut) with the Keep-Tools option enabled, using the
+   prototype body as the tool against the mold box THEN the system SHALL carve the prototype's
+   shape as a cavity in the mold box while preserving the prototype body, generalizing the
+   combine / keep-tools behaviour referenced in Requirement 13.3.
+3. WHEN the user splits the mold body on a parting plane THEN the system SHALL produce an upper
+   half and a lower half as separate bodies.
+4. WHEN the user adds two-part mold features THEN the system SHALL create alignment-pin features
+   at the corners of the parting interface and a pour-spout channel from the outer face into the
+   cavity.
+5. WHEN the user sets a clearance-gap parameter between mating printed parts (for example a
+   print-in-place hinge) THEN the system SHALL apply the gap driven by that user parameter so
+   parameter edits propagate to the fit.
+6. WHEN the user runs the nesting/batch-layout command on multiple bodies THEN the system SHALL
+   arrange the bodies into a single print-run layout.
+7. WHEN any mold or DfAM operation runs THEN it SHALL execute through a registered `CommandSpec`,
+   and WHEN a requested configuration is not yet supported THEN the system SHALL return
+   `"not supported yet: …"`.
+8. IF a mold or DfAM operation receives hostile or invalid input THEN the system SHALL return an
+   error and leave the design unchanged, never panicking.
+
+---
+
+### Requirement 15: 3D interchange export (public-specification formats) · Stage 2
+
+**User Story:** As a user handing a design to another tool, printer, or game engine, I want to
+export bodies through `file.export` into the common public 3D formats, so I can interchange
+geometry without depending on any commercial CAD product's proprietary archive.
+
+> Clean-room / independence note (Requirement 1.5): every format below is either already
+> shipping, planned from a **public specification**, or **explicitly excluded** with a recorded
+> reason. SolidCraft SHALL NOT implement write (or read) support for proprietary vendor CAD /
+> DCC scene formats by reverse-engineering, linking a proprietary SDK, or reading GPL sources
+> (Blender). Where a format is excluded, the independent equivalent is the closest public
+> format in the same row (for example glTF/GLB instead of FBX; STEP instead of Parasolid /
+> ACIS / SolidWorks / Fusion / Inventor archives).
+
+#### Acceptance Criteria
+
+1. WHEN the user exports through `file.export` (or the equivalent CLI / MCP `export` tool)
+   THEN the system SHALL continue to support the already-shipping body formats: STEP (`.step` /
+   `.stp`), IGES (`.iges` / `.igs`), 3MF (`.3mf`), STL binary (`.stl`) and STL ASCII
+   (`.stla` / `stl-ascii`), Wavefront OBJ (`.obj`), and the native `.solidcraft` design
+   container, preserving existing command ids and round-trip behaviour.
+2. WHEN the user exports Wavefront OBJ THEN the system SHALL optionally write a companion
+   Material Template Library file (`.mtl`) that references per-body (or per-appearance) base
+   colour / opacity derived from SolidCraft appearances, with the OBJ referencing that MTL by
+   public Wavefront conventions — never by copying another product's material names.
+3. WHEN the user exports a tessellated interchange format THEN the system SHALL write, through
+   the same `file.export` path and the existing guarded tessellation, at least: Khronos glTF
+   (`.gltf`) and binary glTF (`.glb`), Stanford PLY (`.ply`), ASTM AMF (`.amf`), COLLADA
+   (`.dae`), X3D (`.x3d`), VRML 2.0 (`.wrl` / `.vrml`), and VRM (`.vrm`, as a glTF-based
+   public extension). Units SHALL remain millimetres internally and be declared in each format
+   where the specification defines a unit field; Z-up SHALL be preserved or explicitly
+   transformed with a recorded axis convention in the file metadata.
+4. WHEN the user exports Universal Scene Description THEN the system SHALL write at least one
+   of `.usd`, `.usda`, `.usdc`, or `.usdz` using the **OpenUSD** public specification (or an
+   openly licensed non-GPL binding), staged after the tessellated set in criterion 3 if needed;
+   unsupported USD features return `"not supported yet: …"` without panicking.
+5. WHEN any new export format is added THEN it SHALL live in `crates/io` (L3), be selectable by
+   extension through `Format::from_name`, be reachable from `file.export` / CLI / MCP, build for
+   `wasm32-unknown-unknown` where the writer is pure Rust (or degrade gracefully on wasm with a
+   clear error when a native-only dependency is required), and treat path / size / triangle-count
+   inputs as hostile (finite checks, caps, `get()` indexing).
+6. IF the design has no exportable bodies, or a format / option is not yet supported, THEN the
+   system SHALL return an error (including `"not supported yet: …"` where applicable) and leave
+   the design unchanged, never panicking.
+7. WHEN a proprietary or closed vendor format is requested THEN the system SHALL refuse it with
+   a clear unsupported-format error and SHALL NOT attempt to write it. The following are
+   **explicitly excluded** under Requirement 1.5, with the recorded reason and the independent
+   public equivalent:
+
+   | Requested | Reason excluded | Independent equivalent |
+   |---|---|---|
+   | `.fbx` (Filmbox) | Autodesk proprietary; no clean-room public write spec usable without a proprietary SDK | `.gltf` / `.glb` |
+   | `.blend` (Blender) | Native Blender format; implementing it via Blender sources would violate the no-GPL rule | `.gltf` / `.glb` or `.obj` |
+   | `.max` (3ds Max) | Autodesk proprietary scene | `.gltf` / `.glb` |
+   | `.c4d` (Cinema 4D) | Maxon proprietary project | `.gltf` / `.glb` |
+   | `.ma` / `.mb` (Maya) | Autodesk proprietary scene | `.gltf` / `.glb` |
+   | `.dwg` (AutoCAD Drawing) | Autodesk proprietary binary; DXF is the public exchange form | `.dxf` (already shipping for sketches/drawings) |
+   | `.skp` (SketchUp) | Trimble proprietary | `.gltf` / `.glb` or `.obj` |
+   | `.sldprt` / `.sldasm` (SolidWorks) | Dassault proprietary; commercial CAD product formats are forbidden | `.step` / `.stp` |
+   | `.f3d` (Fusion 360 archive) | Autodesk proprietary; commercial CAD product formats are forbidden | `.solidcraft` or `.step` |
+   | `.ipt` / `.iam` (Inventor) | Autodesk proprietary; commercial CAD product formats are forbidden | `.step` / `.stp` |
+   | `.sat` (ACIS) | Spatial proprietary kernel format | `.step` / `.stp` |
+   | `.x_t` / `.x_b` / Parasolid | Siemens proprietary kernel format | `.step` / `.stp` |
+
+8. WHEN an export completes THEN observable results for new formats SHALL be covered by
+   round-trip or structural tests in `crates/io` / `crates/engine` (extending
+   `export_formats_tests`), with expected values from analytic geometry or SolidCraft's own
+   re-import — never from a commercial CAD product.

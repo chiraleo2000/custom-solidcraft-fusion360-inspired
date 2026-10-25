@@ -840,6 +840,8 @@ mod construct_tests;
 #[cfg(test)]
 mod delete_face_tests;
 #[cfg(test)]
+mod export_formats_tests;
+#[cfg(test)]
 mod extent_tests;
 #[cfg(test)]
 mod hole_face_tests;

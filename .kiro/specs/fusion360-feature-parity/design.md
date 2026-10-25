@@ -1,6 +1,6 @@
 # Design — Fusion 360 Feature Parity
 
-## Introduction
+## Overview
 
 This document turns the staged parity requirements into a concrete architecture grounded in
 SolidCraft's actual crates. It is deliberately **seed-first**: every "deferred" Fusion workspace
@@ -29,7 +29,9 @@ L1  sketch      constraint solver, sketch entities
     kernel      B-rep via truck (the ONLY crate that may use truck); guard(); mesh/tspline/freeform
     render      camera, picking rays, CPU rasterizer, (later) visual styles
 L2  doc         Document, FeatureKind timeline, eval -> Model/ModelState, drawings, cam jobs
-L3  io          .solidcraft container (solidcraft-container/1), STEP/IGES/3MF/STL/OBJ/DXF/SVG
+L3  io          .solidcraft container (solidcraft-container/1), STEP/IGES/3MF/STL/OBJ(+MTL)/
+                DXF/SVG/PDF; Stage-2 tessellated writers (glTF/GLB, PLY, AMF, DAE, X3D, VRML, VRM)
+                and later OpenUSD; proprietary vendor formats are refused, never implemented
 L4  engine      Session, CommandSpec registry (cmd/*), catch_unwind, crash reports
 L5  ui-egui     thin panels; theme::Tokens; swappable
     apps        solidcraft (desktop), solidcraft-cli, solidcraft-web (wasm), mcp
@@ -45,6 +47,7 @@ deepened logic.
 | **1 Mesh RE** | — | `meshbody`/`mesh_convert` deepen; `remesh`; deviation | — | mesh `FeatureKind` variants | — | deepen `mesh.*` + `mesh.deviation` | inspect panel (thin) |
 | **1 UI-shell** | — | — | **visual styles**, camera orientations, picking modes/filters | selection/filter state is read-only | — | `ui.*` quick-toolbox, context menu, repeat-last | S-toolbox, marking menu, ViewCube, style switch |
 | **2 Drawing** | 2D projection helpers | hidden-line/section curve extraction | — | `DrawingSheet` depth (views/dims/BOM) | SVG/DXF/PDF out | deepen `drawing.*` | sheet panel |
+| **2 Interchange** | — | tessellate (existing, guarded) | — | — | **deepen `Format` + writers** (MTL, glTF/GLB, PLY, AMF, DAE, X3D, VRML, VRM; later USD); refuse proprietary | deepen `file.export` | export dialog lists public formats only |
 | **3 CAM** | 2D offset helpers | toolpath geometry (own) | — | `CamJob` → setups/ops | G-code text | deepen `cam.*` | CAM panel |
 | **4 FEA / Generative** | mesh/grid math | own or non-GPL solver seam | result overlay | study entities | — | `sim.*`, `generative.*` | result panels |
 | **5 Render / Animation** | — | — | PBR path, frame capture | appearances (reuse), storyboard | image/video out | `render.*`, `anim.*` | preview panels |
@@ -290,24 +293,80 @@ through the command layer.
 world **Z up preserved**, consistent with the existing axis navigation. The command is in
 `view.rs` (`view.orient { direction }`).
 
-**Selection modes & filters (2.4, 2.5).** Picking resolution is pure over a ray + candidate set
-and already partly lives in `render`. Deepen:
+**Selection modes & filters (2.4, 2.5, 2.9, 2.10, 2.11).** Picking resolution is pure over a ray +
+candidate set and already partly lives in `render`. Deepen:
 
 ```rust
 // render — pure, deterministic, swappable-shell-safe
-enum SelectMode { Entity, Body, Occluded }   // occluded picks resolved by sorted depth
+enum SelectMode {
+    Entity,
+    Body,
+    Occluded,                        // depth-stack chooser; resolved by sorted depth
+    Window { drag: DragDir },        // box select; drag sign chooses enclosed vs crossing
+    Freeform,                        // lasso: point-in-polygon against the drag polygon
+    Paint,                           // accumulate faces/edges under a swept cursor path
+}
+enum DragDir { LeftToRight, RightToLeft }   // sign of (end.x - start.x)
 struct SelectFilter { faces: bool, edges: bool, vertices: bool,
                       sketch_curves: bool, bodies: bool, components: bool }
 fn pick(ray: Ray, candidates: &[Pickable], mode: SelectMode, filter: SelectFilter)
     -> Option<Pickable>;   // returns only permitted kinds; deterministic ordering
 ```
 
-The engine holds the current mode/filter as session state; `ui.*` commands set them.
+The engine holds the current mode/filter as session state; `ui.*` commands set them. The three
+drag-based modes are pure, deterministic functions in `render`, and like `pick` every one returns
+only kinds permitted by the active `SelectFilter`:
 
-**Visual styles (2.6).** `render` gains a `VisualStyle { Shaded, ShadedEdges, HiddenEdges,
-Wireframe }` that drives the rasterizer and the GPU viewport. Switching style changes **only
-render parameters** — it must not touch `doc.features` or the evaluated `ModelState`. The style is
-a view setting, not a document edit (so it is not undoable and not serialized into the design).
+- **Window (2.9).** A box select over a candidate set. The **drag direction sign**
+  (`end.x - start.x`) decides the semantics: left-to-right selects only entities **fully enclosed**
+  by the box; right-to-left selects entities the box **encloses or crosses**. Both are computed
+  purely from the box and the projected candidate bounds — no mutable state, same inputs → same set.
+- **Freeform / lasso (2.10).** A closed freeform drag polygon; an entity is selected when its
+  projected point passes a **point-in-polygon** test against the lasso polygon. Pure and
+  deterministic in `render`.
+- **Paint (2.11).** A swept cursor path; each face/edge the path crosses is **accumulated** into
+  the selection. The accumulation is an order-independent set of the kinds the filter permits, a
+  pure fold over the sampled path in `render`.
+
+```rust
+// render — all pure, deterministic, filter-aware
+fn select_window(box2: Rect2, dir: DragDir, candidates: &[Pickable], filter: SelectFilter)
+    -> Vec<Pickable>;    // L→R enclosed; R→L enclosed-or-crossing
+fn select_freeform(lasso: &[Vec2], candidates: &[Pickable], filter: SelectFilter)
+    -> Vec<Pickable>;    // point-in-polygon
+fn select_paint(path: &[Vec2], candidates: &[Pickable], filter: SelectFilter)
+    -> Vec<Pickable>;    // swept-path accumulation
+```
+
+**Depth chooser (2.12).** Pressing and holding over overlapping geometry asks `render` for the
+stacked candidates under the ray. A pure `render` function returns them **ordered by sorted ray
+depth** (profiles, faces, edges, bodies — only the kinds the filter permits), without hiding any
+bodies:
+
+```rust
+// render — pure: stacked candidates ordered front-to-back by ray depth
+fn depth_stack(ray: Ray, candidates: &[Pickable], filter: SelectFilter) -> Vec<Pickable>;
+```
+
+The egui layer (`ui-egui`) only **presents** that ordered list and runs the chosen pick through the
+command layer; no body hiding happens anywhere.
+
+**Visual styles (2.6, 2.13).** `render` gains a `VisualStyle { Shaded, ShadedEdges, HiddenEdges,
+Wireframe }` that drives the rasterizer and the GPU viewport. The four named styles the shell
+offers map onto this one enum: **Shaded** → `Shaded`, **Shaded with visible edges only** →
+`ShadedEdges`, **Shaded with hidden edges** → `HiddenEdges`, and the **Wireframe** family →
+`Wireframe`. The three wireframe sub-variants are presentation sub-settings of the single
+`Wireframe` style (one style, not three enum members), so the user-facing count stays exactly four.
+Switching style changes **only render parameters** — it must not touch `doc.features` or the
+evaluated `ModelState`. The style is a view setting, not a document edit (so it is not undoable and
+not serialized into the design, **Requirement 2.14**).
+
+**Component color cycling (2.15).** A view-only coloring pass in `render` keyed by **component id**:
+each component is drawn in a distinct cycled color in the viewport and in the browser/timeline. Like
+`VisualStyle`, it is a pure render parameter — it does **not** touch `doc.features` or
+`doc::appearance`, so it is **not undoable and not serialized**, and the assigned appearances and
+model geometry are left unchanged. The toggle is a `view.*` command; `ui-egui` only reflects the
+flag.
 
 **Thinness & invalid targets (2.7, 2.8).** The shell reads engine state and acts through
 `app.run`/`app.start`; colours come from `theme::Tokens` (the existing `ui-egui::theme::Tokens`).
@@ -336,6 +395,67 @@ independently shippable and may be re-prioritized by the owner (**Requirement 1.
 - **Export:** SVG is seeded; DXF/PDF derived from public specs in `io`.
 - **Lost references (6.7):** a view updates what it can and reports the lost reference; never panic.
 
+### Stage 2 — 3D interchange export (Requirement 15)
+
+**Owning crates:** `crates/io` (L3) owns every writer and `Format::from_name`; `crates/kernel`
+owns tessellation / STEP / IGES behind `guard` (unchanged seam); `crates/engine` deepens
+`file.export` (and CLI / MCP `export`) so new extensions resolve through the same command;
+`crates/ui-egui` only lists public formats in the export dialog (thin).
+
+**Already shipping (15.1) — do not rebuild.** `Format::{StlBinary, StlAscii, Obj, Step, Iges,
+ThreeMf, Design}` in `crates/io/src/lib.rs`, covered by `crates/engine/src/export_formats_tests.rs`.
+IGES write goes through `solidcraft_kernel::iges_export_bodies`; STEP through
+`step_export_bodies`. Mesh import already accepts STL/OBJ/3MF.
+
+**Deepening work — tessellated public writers (15.2, 15.3).**
+
+All new mesh/scene writers reuse `export_mesh` (existing chord-tolerance tessellation) and share
+one pipeline:
+
+```
+file.export { path | format, bodies? }
+        │
+        ▼
+Format::from_name(ext)   ← add new arms; unknown / excluded → IoError::Format
+        │
+        ▼
+export(state, bodies, format, name)
+        │
+        ├─ B-rep: Step / Iges          (kernel, guarded)
+        └─ Mesh:  tessellate → writer  (pure Rust in crates/io)
+```
+
+| Format | Ext | Spec basis | Notes |
+|---|---|---|---|
+| Wavefront MTL | `.mtl` | public Wavefront companion | Written beside OBJ; `mtllib` / `usemtl`; colour/opacity from appearances |
+| glTF / GLB | `.gltf`, `.glb` | Khronos glTF 2.0 | Preferred general mesh interchange; Y-up conversion recorded if needed, source Z-up preserved in metadata |
+| PLY | `.ply` | Stanford PLY | ASCII and/or binary little-endian |
+| AMF | `.amf` | ASTM AMF | XML mesh + optional colour |
+| COLLADA | `.dae` | Khronos COLLADA | Triangle meshes + node names from body names |
+| X3D | `.x3d` | Web3D / ISO X3D | XML encoding |
+| VRML | `.wrl`, `.vrml` | VRML 97 | Classic VRML 2.0 text |
+| VRM | `.vrm` | VRM (glTF extension) | Built on the glTF writer; avatar-specific extras only when present — otherwise a valid glTF-based VRM container with the mesh |
+
+**OpenUSD (15.4) — later inside the same requirement.** Prefer a pure-Rust or openly licensed
+non-GPL path that emits `.usda` (ASCII) first, then `.usdc` / `.usd` / `.usdz` as bindings allow.
+If a native dependency cannot build for wasm, the wasm build returns
+`"not supported yet: usd on this target"` rather than breaking `cargo xtask wasm`.
+
+**Explicit refusals (15.7).** `Format::from_name` and `file.export` reject the proprietary set
+(`.fbx`, `.blend`, `.max`, `.c4d`, `.ma`/`.mb`, `.dwg`, `.skp`, `.sldprt`/`.sldasm`, `.f3d`,
+`.ipt`/`.iam`, `.sat`, `.x_t`/`.x_b`) with `IoError::Format` (or engine `bad`) naming the
+independent equivalent. No SDK, no reverse engineering, no GPL reader/writer.
+
+**Hostile input & never-crash (15.5, 15.6).** Triangle counts, path lengths, and appearance
+indices are capped before allocation; non-finite mesh positions abort the export with `Err`;
+kernel tessellation stays inside `guard`. Empty body selection → `IoError::Empty`.
+
+**UI.** The export dialog / file picker lists only implemented public formats; excluded
+extensions never appear as choices. No new modelling capability — this is I/O only.
+
+**wasm.** Tessellated writers are pure Rust (string/XML/JSON/binary buffers) and must stay
+wasm-clean. USD may be native-only with a graceful error on wasm.
+
 ### Stage 3 — Manufacture / CAM depth (Requirement 7)
 
 - **Seed:** `cam.contour` and the `CamJob` entity in `doc`.
@@ -346,6 +466,58 @@ independently shippable and may be re-prioritized by the owner (**Requirement 1.
 - **Post:** a configurable, SolidCraft-authored G-code post in `io`/`engine`; **no vendor
   post-processor files** copied.
 - **Simulation:** report removed/remaining stock as a measured volume.
+
+### Stage 3-adjacent — Mold design & DfAM (Requirement 14) · own track
+
+This is its **own track**, Stage-3-adjacent but **independently shippable**: it builds on the
+existing solid/boolean/offset/split capabilities, not on CAM toolpaths, so it neither blocks nor
+depends on the rest of Stage 3 (consistent with the requirements note).
+
+**Owning crates.** `crates/doc` for the new `FeatureKind` variants; `crates/kernel` for the
+boolean / offset / split work (all behind `guard`); `crates/engine/src/cmd/` for the new commands
+(SolidCraft's own dotted ids); `crates/ui-egui` a thin panel. Every new `FeatureKind` variant and
+every new field is added behind `#[serde(default)]` so `solidcraft-container/1` designs round-trip.
+
+**Mold box (`mold.box`, 14.1).** A bounding-box-derived solid that fully encloses the prototype
+body, built as a kernel primitive (`kernel::mold_box`) from the prototype's axis-aligned bounds
+plus a user margin. Recorded as `FeatureKind::MoldBox`.
+
+**Cavity (14.2) — reuse combine with Keep Tools.** This is the existing boolean Combine/Cut, not a
+new boolean path. Because Requirement 13.3 already references combine with **keep-tools**, we
+**extend the existing combine command/variant** with a `#[serde(default)] keep_tools: bool` field
+rather than adding a brand-new boolean. With `keep_tools = true`, cutting the prototype (tool) out
+of the mold box carves the cavity while the prototype body **survives**. The dedicated
+`mold.cavity` id is a thin convenience wrapper that runs the same combine with `keep_tools` set; it
+adds no new boolean logic.
+
+**Two-part mold (`mold.split` + `mold.alignment_pins` + `mold.pour_spout`, 14.3, 14.4).**
+
+- **Split** on a parting plane uses the **existing split capability** to divide the mold body into
+  an **upper** and a **lower** body (two separate bodies).
+- **Alignment pins** (`mold.alignment_pins`) are parametric cylinder bosses on one half and matching
+  holes on the other, placed at the **corners of the parting interface** — modelled as standard
+  cylinder/boss + hole features so they stay parametric and editable.
+- **Pour spout** (`mold.pour_spout`) is a swept/extruded **cut** channel from an outer face into the
+  cavity.
+
+**DfAM (`dfam.clearance`, `dfam.nest`, 14.5, 14.6).**
+
+- **Clearance gap** is a **user parameter / expression** applied between mating printed parts (e.g.
+  a print-in-place hinge) via an offset-face or a modelled gap, so a parameter edit propagates to
+  the fit (reusing the existing parameter/expression machinery in `doc`).
+- **Nesting / batch layout** arranges multiple bodies into one print-run layout using SolidCraft's
+  **own 2D packing in `geom`** (a bounded, capped shelf/row packer). **No GPL packer** is read,
+  linked, or vendored. Recorded as `FeatureKind::Nesting`.
+
+**Kernel/guard & never-crash (14.7, 14.8).** Every B-rep call (mold box, boolean cut, split, offset
+for the clearance gap) routes through `solidcraft_kernel::guard("mold.<op>", || …)`; a `truck`
+panic becomes `KernelError::Internal`. Body counts, bounds, margins, pin counts, and packing
+rectangle counts are **input-derived and hostile**: finite checks, `get()` not `[i]`, explicit caps
+before any allocation. An unsupported configuration returns
+`Err(bad(cmd, "not supported yet: …"))` and leaves `doc.features` unchanged.
+
+**wasm.** The mold/DfAM math is boolean/offset/split over existing bodies plus pure 2D packing in
+`geom`; no threads or file I/O, so `cargo xtask wasm` stays green.
 
 ### Stage 4 — Simulation (FEA) & Generative Design (Requirements 8, 9)
 
@@ -380,7 +552,7 @@ independently shippable and may be re-prioritized by the owner (**Requirement 1.
 
 ---
 
-## Components and interfaces
+## Data Models
 
 ### New / extended document entities (data model)
 
@@ -397,6 +569,14 @@ designs round-trip unchanged. Summary of Stage 1 additions:
 | `FeatureKind::MeshRemesh` | doc | new | sibling of existing mesh variants |
 | `Deviation { max, mean }` (result, not a feature) | doc/kernel | new | returned by `mesh.deviation` |
 | `VisualStyle`, `SelectMode`, `SelectFilter` | render | new | **view state, not serialized into the design** |
+| `FeatureKind::Combine { .., keep_tools }` | doc | extend existing | `#[serde(default)] keep_tools: bool`; tool body survives the cut (mold cavity) |
+| `FeatureKind::MoldBox` | doc | new (later-phase) | bounding-box-derived enclosing solid + margin |
+| `FeatureKind::MoldSplit` | doc | new (later-phase) | parting-plane split → upper/lower bodies |
+| `FeatureKind::AlignmentPins` | doc | new (later-phase) | parametric cylinder bosses/holes at parting corners |
+| `FeatureKind::PourSpout` | doc | new (later-phase) | swept/extruded cut channel into the cavity |
+| `FeatureKind::Nesting` | doc | new (later-phase) | print-run layout from SolidCraft's own 2D packing (`geom`) |
+
+## Components and interfaces
 
 ### Command surface (CommandSpec ids)
 
@@ -409,8 +589,15 @@ All ids are SolidCraft's own dotted lower-case ids; existing ids are preserved.
 - **Mesh (deepen + add):** keep `mesh.convert|plane_cut|repair|reduce|face_groups|section`; add
   `mesh.remesh`, `mesh.deviation`.
 - **UI-shell:** `ui.quick_toolbox`, `ui.context_menu`, `ui.repeat_last`, `ui.select_mode`,
-  `ui.select_filter`, `view.orient`, `view.visual_style` (exact placement per
-  `ux-ui-shell-improvements`; consume where that spec already provides it).
+  `ui.select_filter`, `view.orient`, `view.visual_style`, `view.component_colors` (exact placement
+  per `ux-ui-shell-improvements`; consume where that spec already provides it).
+- **Mold / DfAM (later-phase):** `mold.box`, `mold.cavity` (thin wrapper over combine with
+  `keep_tools`; the deepened combine id carries the `keep_tools` option itself), `mold.split`,
+  `mold.alignment_pins`, `mold.pour_spout`, `dfam.clearance`, `dfam.nest`.
+- **Interchange (Stage 2):** keep `file.export` / CLI / MCP `export`; deepen `Format::from_name`
+  and `io::export` for `.mtl` (with OBJ), `.gltf`/`.glb`, `.ply`, `.amf`, `.dae`, `.x3d`,
+  `.wrl`/`.vrml`, `.vrm`, and later `.usd`/`.usda`/`.usdc`/`.usdz`. No new command id required
+  unless a format needs distinct params; proprietary extensions stay refused.
 
 ### Kernel interfaces (all behind `guard`, only in `crates/kernel`)
 
@@ -426,6 +613,11 @@ pub fn form_sheet(cage: &Cage, creases: &[..], symmetry: Option<Plane>) -> Resul
 // meshbody.rs / mesh_convert.rs — deepened + new
 pub fn mesh_remesh(mesh: &Body, target: usize) -> Result<Body>;
 pub fn mesh_deviation(brep: &Body, mesh: &Body) -> Result<Deviation>;
+
+// mold.rs — new (later-phase); boolean/split reuse existing kernel ops behind guard
+pub fn mold_box(prototype: &Body, margin: f64) -> Result<Body>;   // bounding-box-derived solid
+pub fn pack_bodies(bodies: &[Body], bounds: Rect2, cap: usize)    // SolidCraft's own 2D packer
+    -> Result<Vec<Placement>>;                                    // non-overlapping, bounded
 ```
 
 Each is called by a command like:
@@ -528,6 +720,7 @@ flowchart TD
     end
     subgraph S2[Stage 2 · later]
         Draw[Drawings depth<br/>drawing.*]
+        Xch[3D interchange<br/>file.export + io writers]
     end
     subgraph S3[Stage 3 · later]
         Cam[Manufacture / CAM<br/>cam.*]
@@ -547,6 +740,7 @@ flowchart TD
     Kern[(crates/kernel<br/>guard · truck-only)]
     DocL[(crates/doc<br/>FeatureKind · entities)]
     Rndr[(crates/render<br/>styles · picking · camera)]
+    IoL[(crates/io<br/>Format · writers)]
 
     Surf --> Kern
     Form --> Kern
@@ -555,6 +749,8 @@ flowchart TD
     Form --> DocL
     Mesh --> DocL
     Shell --> Rndr
+    Xch --> IoL
+    Xch --> Kern
 
     Surf -.->|surfaces feed views| Draw
     Mesh -.->|rebuilt BRep| Draw
@@ -566,20 +762,22 @@ flowchart TD
     Rend -.-> Anim
     DocL -.-> Ecad
     Ecad -.->|push to 3D| DocL
+    DocL -.->|tessellate / B-rep out| Xch
 
     classDef now fill:#dff0d8,stroke:#3c763d;
     classDef later fill:#f5f5f5,stroke:#999,color:#555;
     class Surf,Form,Mesh,Shell now;
-    class Draw,Cam,Fea,Gen,Rend,Anim,Ecad later;
+    class Draw,Xch,Cam,Fea,Gen,Rend,Anim,Ecad later;
 ```
 
 Solid arrows are Stage-1 crate dependencies that exist today. Dotted arrows are later-phase
 consumption seams: each later stage reads `doc`/`kernel` output but adds no dependency that blocks
-Stage 1, so stages stay independently shippable.
+Stage 1, so stages stay independently shippable. Interchange (Requirement 15) deepens `crates/io`
+only and may ship without drawings depth.
 
 ---
 
-## Testing / verification strategy
+## Testing Strategy
 
 The strategy mirrors the repo's existing conventions: unit tests next to code, oracle reference
 tests, hostile-parameter fuzz, and headless-UI / control-channel screenshots. Both example-based
@@ -627,16 +825,22 @@ Correctness Properties section below for the properties themselves.
   headless): `engine.execute` for the new commands, `ui.start` + `ui.click` for the shell,
   `ui.screenshot` / `ui.render` / `solidcraft-cli snapshot` to capture before/after images for
   each observable change (surface create, form sculpt, mesh convert, visual-style switch,
-  ViewCube orient). Screenshots are attached to the PR/issue, **not committed**.
+  ViewCube orient, reference-canvas spline-revolve, mold cavity + two-part split). Screenshots are
+  attached to the PR/issue, **not committed**.
 
 ### Standard-workflow validation (Requirement 13)
 
 - Each Fusion standard workflow is scripted as a control-channel / CLI recipe that runs only
   registered commands end-to-end (parametric mechanical part; mesh reverse-engineering with
   deviation; design-for-manufacturing parameter propagation; assembly-and-motion with limits and
-  interference). Every step must complete through a `CommandSpec`; a timeline edit must
-  re-evaluate dependents; no step may panic; unsupported steps return `"not supported yet: …"`
-  and leave a consistent state (**Requirement 13.6**). Results are captured as screenshots/recording.
+  interference; **reference-canvas spline-revolve** — insert/calibrate a canvas at 1:1, sketch a
+  centerline + fit-point spline, revolve 360°, shell, assign a transparent appearance, with the
+  sketch fully-defined before the revolve (**Requirement 13.7**); and **mold-design** — model a
+  prototype, `mold.box`, combine-cut with `keep_tools` for the cavity, `mold.split` into a two-part
+  mold with alignment pins and a pour spout (**Requirement 13.8**)). Every step must complete
+  through a `CommandSpec`; a timeline edit must re-evaluate dependents; no step may panic;
+  unsupported steps return `"not supported yet: …"` and leave a consistent state
+  (**Requirement 13.6**). Results are captured as screenshots/recording.
 
 ---
 
@@ -648,9 +852,11 @@ specifications and machine-verifiable correctness guarantees.*
 
 Per the prework, the many per-command "unsupported → not supported yet / no panic / unchanged"
 criteria are consolidated into two reusable properties (P1, P2). Stage-1 capabilities get
-concrete, executable properties (P3–P16). Stage 2–6 properties are recorded as **later-phase**
-(P17–P24) so no capability is silently dropped (**Requirement 1.3/1.4**); they become executable
-when those stages are implemented.
+concrete, executable properties (P3–P16, plus the UI-shell drag-selection, depth-chooser, and
+component-color properties P25–P27). Stage 2–6 properties — including the mold/DfAM track and
+3D interchange export — are recorded as **later-phase** (P17–P24, P28–P29) so no capability is
+silently dropped (**Requirement 1.3/1.4**); they become executable when those stages are
+implemented.
 
 ### Property 1: Hostile input never crashes and leaves the design unchanged
 
@@ -659,7 +865,7 @@ missing bodies, and invalid or stale selection targets), executing the command e
 returns an `Err`; it never panics, and on error the document (`doc.features` and parameters) is
 byte-for-byte unchanged.
 
-**Validates: Requirements 2.8, 3.7, 4.5, 5.7, 6.7, 7.7, 8.5, 9.4, 10.4, 11.5, 12.6, 13.6**
+**Validates: Requirements 2.8, 3.7, 4.5, 5.7, 6.7, 7.7, 8.5, 9.4, 10.4, 11.5, 12.6, 13.6, 15.6**
 
 ### Property 2: Unsupported options are reported, not performed
 
@@ -814,7 +1020,7 @@ command id remains registered.
 
 **Validates: Requirements 1.4**
 
-### Property 22 (later-phase): Drawing views and annotations are associative
+### Property 22: Drawing views and annotations are associative (later-phase)
 
 *For any* model change, an associative drawing view and its dimensions/annotations re-derive from
 the current geometry (projected points lie on the view plane; a dimension re-measures the changed
@@ -822,7 +1028,7 @@ geometry), and a BOM's row quantities sum to the component instance count.
 
 **Validates: Requirements 6.1, 6.2, 6.3, 6.4** — *realized when Stage 2 is implemented.*
 
-### Property 23 (later-phase): Toolpaths and exports round-trip through public formats
+### Property 23: Toolpaths and exports round-trip through public formats (later-phase)
 
 *For any* 2D toolpath, every path point is offset from the profile by the tool radius and the depth
 steps cover the full cut depth; and *for any* exported SVG/DXF/G-code, re-parsing the output
@@ -830,7 +1036,7 @@ recovers the geometry/coordinates (round trip).
 
 **Validates: Requirements 6.6, 7.2, 7.5** — *realized when Stages 2–3 are implemented.*
 
-### Property 24 (later-phase): Analysis, render, and ECAD leave geometry unchanged and checks are sound
+### Property 24: Analysis, render, and ECAD leave geometry unchanged and checks are sound (later-phase)
 
 *For any* simulation/generative study, render, or animation, the operation does not alter the CAD
 geometry or real component placements; animation interpolation reproduces the keyed poses at the
@@ -838,3 +1044,56 @@ endpoints; generative candidates respect preserve/obstacle regions; and a DRC/ER
 the violations implied by the clearance/connectivity rules.
 
 **Validates: Requirements 8.3, 9.2, 10.3, 11.2, 11.3, 12.2, 12.3** — *realized when Stages 4–6 are implemented.*
+
+### Property 25: Drag selection is deterministic and respects filter and mode semantics
+
+*For any* candidate set, selection filter, and drag gesture, the three drag-based select modes in
+`render` return only entity kinds the filter permits, return the identical result on repeated
+identical input (deterministic), and honour each mode's defining semantics: window selection by the
+drag-direction sign (left-to-right returns exactly the fully-enclosed subset, right-to-left returns
+the enclosed-or-crossing subset), freeform/lasso returns exactly the candidates whose projected
+point lies inside the lasso polygon, and paint returns exactly the faces/edges the swept cursor path
+crosses (order-independent).
+
+**Validates: Requirements 2.9, 2.10, 2.11**
+
+### Property 26: The depth chooser returns candidates ordered by depth and resolves a permitted kind
+
+*For any* picking ray and set of overlapping candidates, `render`'s depth stack returns the
+candidates strictly ordered front-to-back by ray depth, containing only kinds the active filter
+permits and with no body hidden, and the chosen pick resolves to one of those permitted kinds.
+
+**Validates: Requirements 2.12**
+
+### Property 27: Component color cycling changes nothing but the view
+
+*For any* design and *any* component-color-cycling toggle state, the operation leaves `doc.features`,
+the evaluated body topology, and the assigned appearances (`doc::appearance`) unchanged, and the
+coloring flag is neither recorded on the undo stack nor serialized into the design (a save/reload
+does not carry it).
+
+**Validates: Requirements 2.15**
+
+### Property 28: Mold cavity, split, and nesting are geometrically sound and never crash (later-phase)
+
+*For any* prototype body enclosed by a mold box, a boolean Combine (Cut) with Keep Tools carves a
+cavity whose volume equals the prototype's volume within tolerance while the prototype body is
+preserved; *for any* mold body and parting plane through it, a two-part split yields two bodies whose
+union equals the pre-split mold within tolerance; *for any* set of bodies and layout bounds (under
+cap), nesting produces pairwise non-overlapping placements all within the bounds; and *for any*
+hostile or invalid mold/DfAM input, the command returns an `Err` and never panics.
+
+**Validates: Requirements 14.2, 14.3, 14.6, 14.8** — *realized when the mold/DfAM track is implemented.*
+
+### Property 29: Public interchange exports are structurally sound; proprietary formats are refused (later-phase)
+
+*For any* design with at least one body and *any* implemented public export format (the shipping
+STEP/IGES/3MF/STL/OBJ set plus MTL, glTF/GLB, PLY, AMF, DAE, X3D, VRML, VRM, and later USD),
+`file.export` writes a non-empty file whose structure parses under that format's public rules (or
+round-trips through SolidCraft's own reader where one exists), leaves the design unchanged, and
+never panics; *for any* proprietary/excluded extension (FBX, BLEND, MAX, C4D, MA/MB, DWG, SKP,
+SLDPRT/SLDASM, F3D, IPT/IAM, SAT, X_T/X_B) the command returns an unsupported-format `Err` and
+writes no file; *for any* empty body selection the command returns `Err` and leaves the design
+unchanged.
+
+**Validates: Requirements 15.1, 15.2, 15.3, 15.4, 15.6, 15.7, 15.8** — *realized as writers land.*

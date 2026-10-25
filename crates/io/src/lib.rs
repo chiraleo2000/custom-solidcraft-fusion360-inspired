@@ -1,8 +1,9 @@
 //! File formats. Designs use JSON or versioned containers (`.solidcraft`); the authoritative
-//! document rebuilds on load and optional display caches remain provisional. Bodies export
-//! as STL (binary or ASCII), OBJ, STEP and 3MF. A board exports as a Gerber RS-274X subset.
-//! STEP files import as a base feature (see [`step_import_feature`]), 3MF and STL files as mesh bodies
-//! (see [`mesh_import_feature`]).
+//! document rebuilds on load and optional display caches remain provisional. Bodies export as
+//! STL (binary or ASCII), OBJ (+ MTL), STEP, IGES, 3MF, and the public tessellated interchange
+//! set (glTF/GLB, PLY, AMF, COLLADA, X3D, VRML, VRM, USDA). A board exports as a Gerber RS-274X
+//! subset. STEP files import as a base feature (see [`step_import_feature`]), 3MF and STL files
+//! as mesh bodies (see [`mesh_import_feature`]). Proprietary vendor CAD/DCC formats are refused.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
@@ -30,6 +31,8 @@ pub use safe_write::{backup_path, write_atomic};
 pub use sketch2d::{Geom2, MAX_DRAWING_BYTES};
 pub use svg::read_svg;
 mod obj;
+mod mesh_out;
+pub use mesh_out::{MAX_EXPORT_TRIANGLES, MeshExport};
 pub use obj::read_obj;
 pub use threemf::{MAX_3MF_BYTES, MeshObject, model_xml, read_3mf, weld, write_3mf};
 
@@ -56,8 +59,12 @@ pub const MAX_DESIGN_BYTES: usize = 256 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IoError {
-    #[error("unsupported format `{0}` (use stl, obj, step, 3mf or solidcraft)")]
+    #[error("unsupported format `{0}` (use stl, obj, step, iges, 3mf, gltf, glb, ply, amf, dae, x3d, wrl, vrm, usda or solidcraft)")]
     Format(String),
+    #[error("proprietary format `{requested}` is not supported; export as {hint} instead")]
+    Proprietary { requested: String, hint: &'static str },
+    #[error("not supported yet: {0}")]
+    NotSupportedYet(String),
     #[error("nothing to export: the design has no bodies")]
     Empty,
     #[error("{0}")]
@@ -196,9 +203,20 @@ pub enum Format {
     StlBinary,
     StlAscii,
     Obj,
+    /// Wavefront MTL companion (normally written beside OBJ; also selectable alone).
+    Mtl,
     Step,
     Iges,
     ThreeMf,
+    Gltf,
+    Glb,
+    Ply,
+    Amf,
+    Dae,
+    X3d,
+    Vrml,
+    Vrm,
+    Usda,
     Design,
 }
 
@@ -206,17 +224,66 @@ impl Format {
     /// From a file name or extension (`part.stl`, `step`, `stp`…).
     pub fn from_name(name: &str) -> Result<Format> {
         let ext = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
+        // Proprietary vendor CAD/DCC formats: refuse with the public equivalent (Req 15.7).
+        if let Some(hint) = proprietary_hint(&ext) {
+            return Err(IoError::Proprietary { requested: ext, hint });
+        }
         Ok(match ext.as_str() {
             "stl" => Format::StlBinary,
             "stla" | "stl-ascii" => Format::StlAscii,
             "obj" => Format::Obj,
+            "mtl" => Format::Mtl,
             "step" | "stp" => Format::Step,
             "igs" | "iges" => Format::Iges,
             "3mf" => Format::ThreeMf,
+            "gltf" => Format::Gltf,
+            "glb" => Format::Glb,
+            "ply" => Format::Ply,
+            "amf" => Format::Amf,
+            "dae" => Format::Dae,
+            "x3d" => Format::X3d,
+            "wrl" | "vrml" => Format::Vrml,
+            "vrm" => Format::Vrm,
+            "usda" | "usd" => Format::Usda,
+            "usdc" | "usdz" => return Err(IoError::NotSupportedYet(format!("{ext} (use .usda or .usd ASCII)"))),
             "solidcraft" | "solvecraft" | "json" => Format::Design,
             _ => return Err(IoError::Format(ext)),
         })
     }
+
+    /// Whether this format is a tessellated mesh/scene writer (vs B-rep or design).
+    pub fn is_tessellated(self) -> bool {
+        matches!(
+            self,
+            Format::StlBinary
+                | Format::StlAscii
+                | Format::Obj
+                | Format::Mtl
+                | Format::Gltf
+                | Format::Glb
+                | Format::Ply
+                | Format::Amf
+                | Format::Dae
+                | Format::X3d
+                | Format::Vrml
+                | Format::Vrm
+                | Format::Usda
+                | Format::ThreeMf
+        )
+    }
+}
+
+/// Public equivalent suggested when a proprietary extension is refused.
+fn proprietary_hint(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "fbx" => "gltf/glb",
+        "blend" => "gltf/glb or obj",
+        "max" | "c4d" | "ma" | "mb" | "skp" => "gltf/glb",
+        "dwg" => "dxf",
+        "sldprt" | "sldasm" | "f3d" | "ipt" | "iam" | "sat" | "x_t" | "x_b" | "x_t_bin" => "step/stp",
+        "parasolid" => "step/stp",
+        _ => return None,
+    })
 }
 
 /// Fine export mesh for a body (chord tolerance 2e-4 of its size).
@@ -266,41 +333,57 @@ pub fn stl_ascii(meshes: &[Mesh], name: &str) -> String {
     s
 }
 
-/// Wavefront OBJ, one object per body.
+/// Wavefront OBJ, one object per body (no materials).
 pub fn obj(meshes: &[(String, Mesh)]) -> String {
-    let mut s = String::from("# SolidCraft OBJ export (mm)\n");
-    let mut base = 1usize;
-    for (name, m) in meshes {
-        s += &format!("o {}\n", name.replace(char::is_whitespace, "_"));
-        for p in &m.positions {
-            s += &format!("v {} {} {}\n", p.x, p.y, p.z);
-        }
-        for n in &m.normals {
-            s += &format!("vn {} {} {}\n", n.x, n.y, n.z);
-        }
-        for t in &m.triangles {
-            let [a, b, c] = t.map(|i| i as usize + base);
-            s += &format!("f {a}//{a} {b}//{b} {c}//{c}\n");
-        }
-        base += m.positions.len();
-    }
-    s
+    let bodies: Vec<MeshExport> = meshes
+        .iter()
+        .filter_map(|(name, m)| MeshExport::from_body(name.clone(), m.clone(), None, 1.0).ok())
+        .collect();
+    mesh_out::write_obj_with_mtl(&bodies, "")
 }
 
-/// Export the given bodies of a model (all when `bodies` is empty) in a format.
-pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str) -> Result<Vec<u8>> {
+/// Sidecar files to write next to the primary export (OBJ → companion `.mtl`).
+pub fn export_sidecars(state: &ModelState, bodies: &[String], format: Format, name: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    if format != Format::Obj {
+        return Ok(Vec::new());
+    }
+    let sel = selected_bodies(state, bodies)?;
+    let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+    let mtl_name = format!("{name}.mtl");
+    Ok(vec![(mtl_name, mesh_out::write_mtl(&meshes).into_bytes())])
+}
+
+fn selected_bodies<'a>(state: &'a ModelState, bodies: &[String]) -> Result<Vec<&'a solidcraft_doc::ModelBody>> {
     let sel: Vec<&solidcraft_doc::ModelBody> = state.bodies.iter().filter(|b| bodies.is_empty() || bodies.contains(&b.name)).collect();
     if sel.is_empty() {
         return Err(IoError::Empty);
     }
+    Ok(sel)
+}
+
+/// Export the given bodies of a model (all when `bodies` is empty) in a format.
+pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str) -> Result<Vec<u8>> {
+    let sel = selected_bodies(state, bodies)?;
     Ok(match format {
-        Format::StlBinary | Format::StlAscii | Format::Obj => {
-            let meshes: Vec<(String, Mesh)> = sel.iter().map(|b| Ok((b.name.clone(), export_mesh(&b.body)?))).collect::<Result<_>>()?;
-            match format {
-                Format::StlBinary => stl_binary(&meshes.into_iter().map(|(_, m)| m).collect::<Vec<_>>(), name),
-                Format::StlAscii => stl_ascii(&meshes.into_iter().map(|(_, m)| m).collect::<Vec<_>>(), name).into_bytes(),
-                _ => obj(&meshes).into_bytes(),
+        Format::StlBinary | Format::StlAscii => {
+            let meshes: Vec<Mesh> = sel.iter().map(|b| export_mesh(&b.body)).collect::<Result<_>>()?;
+            let n: usize = meshes.iter().map(|m| m.triangles.len()).sum();
+            if n > mesh_out::MAX_EXPORT_TRIANGLES {
+                return Err(IoError::Invalid(format!("export with {n} triangles (limit {})", mesh_out::MAX_EXPORT_TRIANGLES)));
             }
+            match format {
+                Format::StlBinary => stl_binary(&meshes, name),
+                _ => stl_ascii(&meshes, name).into_bytes(),
+            }
+        }
+        Format::Obj => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            let mtl = format!("{name}.mtl");
+            mesh_out::write_obj_with_mtl(&meshes, &mtl).into_bytes()
+        }
+        Format::Mtl => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_mtl(&meshes).into_bytes()
         }
         Format::Step => {
             let bs: Vec<solidcraft_kernel::ExportBody> =
@@ -336,6 +419,42 @@ pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str)
                 })
                 .collect::<Result<_>>()?;
             write_3mf(&objs)?
+        }
+        Format::Gltf => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_gltf(&meshes, name)?
+        }
+        Format::Glb => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_glb(&meshes, name, false)?
+        }
+        Format::Vrm => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_glb(&meshes, name, true)?
+        }
+        Format::Ply => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_ply(&meshes).into_bytes()
+        }
+        Format::Amf => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_amf(&meshes, name).into_bytes()
+        }
+        Format::Dae => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_dae(&meshes, name).into_bytes()
+        }
+        Format::X3d => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_x3d(&meshes, name).into_bytes()
+        }
+        Format::Vrml => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_vrml(&meshes, name).into_bytes()
+        }
+        Format::Usda => {
+            let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
+            mesh_out::write_usda(&meshes, name).into_bytes()
         }
         Format::Design => return Err(IoError::Format("solidcraft (save the document instead)".into())),
     })

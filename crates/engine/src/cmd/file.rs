@@ -48,7 +48,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("file.export", "Export", export)
         .icon("export")
         .noundo()
-        .params("path; format?: stl|stla|obj|step|3mf|json (default from extension); bodies?: [names] (JSON exports the complete design)"),
+        .params("path; format?: stl|stla|obj|mtl|step|iges|3mf|gltf|glb|ply|amf|dae|x3d|wrl|vrm|usda|usd|json (default from extension); bodies?: [names] (JSON exports the complete design; proprietary formats are refused)"),
     CommandSpec::new("file.save_mesh", "Save As Mesh", save_stl).icon("export").noundo().params("path; bodies?: [names]; ascii?: bool"),
 ];
 
@@ -272,6 +272,7 @@ fn save_as(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn export_to(s: &Session, path: &str, format: Format, bodies: &[String]) -> Result<Value> {
     let name = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| s.doc.name.clone());
+    let painted = s.doc.painted(&s.world_state());
     // A design with components exports as a STEP assembly; otherwise bodies as placed.
     let bytes = if format == Format::Design {
         if !bodies.is_empty() {
@@ -282,10 +283,20 @@ fn export_to(s: &Session, path: &str, format: Format, bodies: &[String]) -> Resu
         solidcraft_io::step_assembly(&s.doc, &s.doc.painted(&s.model.state()), &name)?
     } else {
         // Bodies carry the colour they are shown in (appearance, material or imported).
-        solidcraft_io::export(&s.doc.painted(&s.world_state()), bodies, format, &name)?
+        solidcraft_io::export(&painted, bodies, format, &name)?
     };
     solidcraft_io::vfs::write(path, &bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    Ok(json!({"path": path, "bytes": bytes.len(), "format": format!("{format:?}")}))
+    // Wavefront OBJ also writes a companion MTL next to the OBJ (public Wavefront convention).
+    let mut sidecars = Vec::new();
+    if format != Format::Design {
+        for (file, data) in solidcraft_io::export_sidecars(&painted, bodies, format, &name)? {
+            let side = std::path::Path::new(path).with_file_name(&file);
+            let side_s = side.to_string_lossy().into_owned();
+            solidcraft_io::vfs::write(&side_s, &data).map_err(|e| EngineError::Other(format!("{side_s}: {e}")))?;
+            sidecars.push(json!({"path": side_s, "bytes": data.len()}));
+        }
+    }
+    Ok(json!({"path": path, "bytes": bytes.len(), "format": format!("{format:?}"), "sidecars": sidecars}))
 }
 
 fn export(s: &mut Session, p: &Value) -> Result<Value> {

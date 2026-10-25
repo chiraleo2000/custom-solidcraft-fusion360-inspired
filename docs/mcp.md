@@ -57,7 +57,7 @@ Claude Desktop (`claude_desktop_config.json`), bridged to a running app:
 | `body_topology` | `body` | Edges (index, midpoint, length, ends) and faces (index, area, centroid, normal). An edge midpoint is the `[x,y,z]` that picks that edge for fillet and chamfer. |
 | `set_parameter` | `name`, `value` (number or expression), `unit?`, `comment?` | Create or change a user parameter and recompute; reports `recomputed` (features rebuilt), `restored` (features whose earlier result for the same inputs was reused, e.g. a value set back) and features that now fail. |
 | `screenshot` | `view?` (iso, top, front, back, bottom, left, right, home, fit), `path?`, `width?`, `height?`, `source?` (window, model) | A PNG image content block. Headless: CPU render fitted to the model. Bridged: the app window (default) or a model render with the app's camera. |
-| `export` | `path`, `format?` (step, 3mf, stl, stla, obj), `bodies?` | STEP, 3MF or mesh export. |
+| `export` | `path`, `format?` (step, iges, 3mf, stl, stla, obj, mtl, gltf, glb, ply, amf, dae, x3d, wrl, vrm, usda, usd), `bodies?` | STEP/IGES, 3MF, or tessellated public-format export. Proprietary vendor formats are refused. |
 | `undo`, `redo` | — | Undo / redo one change. |
 | `crash_reports` | `id?`, `limit?` | The crash reports on this computer, newest first; with `id`, the whole report (backtrace, command, recent commands, `design_path`/`replay_path`). See [crash-reports.md](crash-reports.md). |
 | `new_design` | `name?` | Start an empty design. |

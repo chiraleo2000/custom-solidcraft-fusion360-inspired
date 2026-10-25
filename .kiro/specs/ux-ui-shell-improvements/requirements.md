@@ -9,18 +9,21 @@ dimension entry, and sketch display. This feature refines that existing shell so
 ordinary person — not only an expert — can understand it quickly and work in it fast,
 across the whole application rather than inside the sketch surface alone.
 
-เป้าหมายของ feature นี้คือทำให้ "คนทั่วไปเข้าใจง่าย ใช้งานได้ไว" ทั่วทั้งแอป โดยยังคงเป็นการ
-*ปรับปรุงของที่มีอยู่* (refinement) ไม่ใช่การสร้างใหม่ และไม่ใช่การเพิ่ม workspace ใหม่. The work
-touches the sketch UX surface (`sketch_tools.rs`, `sketch_palette.rs`, `inference.rs`,
-`drag_snap.rs`, `sketch_dims.rs`, `sketch_display.rs`), the whole-app shell surfaces
-(`palette.rs`, `toolbar.rs`, `workspace.rs`, `params_dialog.rs`, the `dialogs*.rs` family,
-`viewport.rs`, `viewport_layout.rs`, `keymap.rs`, `timeline.rs`, `browser.rs`), and the
-onboarding/coaching surface (`coaching.rs`), supported by shell files (`theme.rs`, `help.rs`,
-`stand_up.rs`, `home.rs`, `i18n.rs`, `icons.rs`).
+The goal is to make the whole app easy for a non-expert to understand and fast to use, as a
+*refinement of what already ships* — not a rewrite, and not new workspaces. The work touches
+the sketch UX surface (`sketch_tools.rs`, `sketch_palette.rs`, `inference.rs`, `drag_snap.rs`,
+`sketch_dims.rs`, `sketch_display.rs`), the whole-app shell surfaces (`palette.rs`,
+`toolbar.rs`, `workspace.rs`, `params_dialog.rs`, the `dialogs*.rs` family, `viewport.rs`,
+`viewport_layout.rs`, `keymap.rs`, `timeline.rs`, `browser.rs`), and the onboarding/coaching
+surface (`coaching.rs`), supported by shell files (`theme.rs`, `help.rs`, `stand_up.rs`,
+`home.rs`, `i18n.rs`, `icons.rs`).
 
 Scope note: features that `ROADMAP.md` defers (Surface/FORM, Render, Animation, Simulation,
-CAM, PCB, 2D Drawing) are **out of scope** here. This spec improves the UX of what already
-ships; it does not add new workspaces or modelling capability.
+CAM, PCB, 2D Drawing) are **out of scope** here. **3D file import/export** (STEP, glTF, STL,
+proprietary refusals, …) is owned by the separate `fusion360-feature-parity` spec
+(Requirement 15) and is likewise out of scope here — this shell may only surface the
+`file.export` command and list formats the engine already supports. This spec improves the UX
+of what already ships; it does not add new workspaces, modelling capability, or I/O formats.
 
 The original sketch-focused outcomes still define success and are preserved below as
 Requirements 1–6:
