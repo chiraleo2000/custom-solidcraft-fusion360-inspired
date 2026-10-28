@@ -13,10 +13,7 @@ fn skip_dir(name: &str) -> bool {
     if name.starts_with('.') || SKIP_DIRS.contains(&name) {
         return true;
     }
-    name.starts_with("target")
-        || name.starts_with("cargo-home")
-        || name.starts_with("rustup-home")
-        || name.starts_with("rustup-")
+    name.starts_with("target") || name.starts_with("cargo-home") || name.starts_with("rustup-home") || name.starts_with("rustup-")
 }
 
 fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {

@@ -8,8 +8,6 @@ on:
   pull_request:
   push:
     branches: [main, dev]
-  schedule:
-    - cron: "17 6 * * *"
   workflow_dispatch:
     inputs:
       cross_compile:
@@ -82,6 +80,8 @@ jobs:
         run: cargo xtask licences --check
       - name: Dependency layers
         run: cargo xtask layers
+      - name: PDF-day workflow gate
+        run: cargo xtask workflows --ci
 
   clippy:
     name: Native Linux Clippy

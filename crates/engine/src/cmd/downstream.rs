@@ -641,8 +641,9 @@ fn cam_nest(_s: &mut Session, p: &Value) -> Result<Value> {
     let mut row = 0.0;
     let mut placed = Vec::new();
     for profile in profiles {
-        let w = profile.get(0).and_then(Value::as_f64).ok_or_else(|| bad(cmd, "each profile is [width, height]"))?;
-        let h = profile.get(1).and_then(Value::as_f64).ok_or_else(|| bad(cmd, "each profile is [width, height]"))?;
+        let pair = profile.as_array().ok_or_else(|| bad(cmd, "each profile is [width, height]"))?;
+        let w = pair.first().and_then(Value::as_f64).ok_or_else(|| bad(cmd, "each profile is [width, height]"))?;
+        let h = pair.get(1).and_then(Value::as_f64).ok_or_else(|| bad(cmd, "each profile is [width, height]"))?;
         let (w, h) = (finite(cmd, w, "profile")?, finite(cmd, h, "profile")?);
         if w <= 0.0 || h <= 0.0 {
             return Err(bad(cmd, "profile size must be positive"));
@@ -3253,7 +3254,7 @@ fn read_region(cmd: &str, p: &Value, layer: u32, net: String) -> Result<EcadRegi
         if pair.len() != 2 {
             return Err(bad(cmd, format!("region point {index} must be [x, y]")));
         }
-        let x = pair.get(0).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("region point {index} x must be a number")))?;
+        let x = pair.first().and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("region point {index} x must be a number")))?;
         let y = pair.get(1).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("region point {index} y must be a number")))?;
         points.push([board_mm(cmd, x, "points")?, board_mm(cmd, y, "points")?]);
     }
@@ -3761,8 +3762,8 @@ fn promote_lattice_body(s: &mut Session, cmd: &str, body_name: &str, pieces: &[G
     }
     let pitch = first.size;
     for cell in pieces.iter().skip(1) {
-        for axis in 0..3 {
-            if (cell.size[axis] - pitch[axis]).abs() > 1e-6 {
+        for (cell_axis, pitch_axis) in cell.size.iter().zip(pitch.iter()) {
+            if (cell_axis - pitch_axis).abs() > 1e-6 {
                 return Err(bad(cmd, "lattice cells must share one pitch"));
             }
         }

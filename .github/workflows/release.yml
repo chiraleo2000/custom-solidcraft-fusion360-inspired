@@ -45,6 +45,8 @@ env:
 
 jobs:
   version:
+    # Forks must not burn Actions minutes (or publish nightlies) on the upstream schedule.
+    if: github.event_name != 'schedule' || github.repository == 'bherbruck/solidcraft'
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.changed.outputs.build }}

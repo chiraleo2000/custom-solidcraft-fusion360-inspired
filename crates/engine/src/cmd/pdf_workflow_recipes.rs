@@ -148,10 +148,10 @@ fn apply_binds(binds: &mut BTreeMap<String, String>, spec: &Value, result: &Valu
     if binds.get("mesh").map(String::as_str).unwrap_or("").is_empty() {
         if let Some(feat) = binds.get("mesh_feat").cloned().filter(|s| !s.is_empty()) {
             binds.insert("mesh".into(), feat);
-        } else if let Some(Value::String(name)) = result.get("name") {
-            if !name.is_empty() {
-                binds.insert("mesh".into(), name.clone());
-            }
+        } else if let Some(Value::String(name)) = result.get("name")
+            && !name.is_empty()
+        {
+            binds.insert("mesh".into(), name.clone());
         }
     }
 }

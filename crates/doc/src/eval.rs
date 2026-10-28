@@ -3116,10 +3116,10 @@ fn guide_sections(
     if !(near_profile(p0, l0, rail) && near_profile(p1, l1, rail)) {
         return Err(DocError::Invalid("the loft rail misses a section".into()));
     }
-    if let Some(other) = second {
-        if other.len() < 2 || !(near_profile(p0, l0, other) && near_profile(p1, l1, other)) {
-            return Err(DocError::Invalid("the loft rail misses a section".into()));
-        }
+    if let Some(other) = second
+        && (other.len() < 2 || !(near_profile(p0, l0, other) && near_profile(p1, l1, other)))
+    {
+        return Err(DocError::Invalid("the loft rail misses a section".into()));
     }
     let sample = |lp: &solidcraft_geom::Loop2, n: usize| -> Vec<Vec2> {
         let poly = lp.polyline(0.05);

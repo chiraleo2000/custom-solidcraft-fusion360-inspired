@@ -233,7 +233,9 @@ fn public_tessellated_formats_export_structurally() {
                 let t = std::str::from_utf8(&bytes).unwrap();
                 assert!(t.starts_with("#usda 1.0") && t.contains("upAxis = \"Z\""));
             }
-            _ => unreachable!(),
+            // Every `ext` in the loop above is covered; keep the match exhaustive for `&str`.
+            #[allow(clippy::unreachable)]
+            _ => unreachable!("unexpected format"),
         }
         let _ = std::fs::remove_file(&p);
     }
