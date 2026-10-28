@@ -148,9 +148,19 @@ fn check_case(dir: &str) -> Value {
 }
 
 /// Export the session's bodies as STEP, validate the file and import it again.
+///
+/// Open surface bodies are skipped when any solid is present: STEP round-trip is about
+/// closed shells, and intentional sheets beside a solid would otherwise always warn.
 fn step_export_check(s: &solidcraft_engine::Session, volume: f64) -> (bool, String) {
     let st = s.model.state();
-    let bytes = match solidcraft_engine::io::export(&st, &[], solidcraft_engine::io::Format::Step, "oracle") {
+    let solids: Vec<String> = st.bodies.iter().filter(|b| !b.body.is_surface()).map(|b| b.name.clone()).collect();
+    // Empty selection means "all bodies" in export; when solids exist, only those go to STEP.
+    let export_names: Vec<String> = if solids.is_empty() { Vec::new() } else { solids };
+    let exported_count = if export_names.is_empty() { st.bodies.len() } else { export_names.len() };
+    if exported_count == 0 {
+        return (false, "export: no bodies".into());
+    }
+    let bytes = match solidcraft_engine::io::export(&st, &export_names, solidcraft_engine::io::Format::Step, "oracle") {
         Ok(b) => b,
         Err(e) => return (false, format!("export: {e}")),
     };
@@ -163,18 +173,19 @@ fn step_export_check(s: &solidcraft_engine::Session, volume: f64) -> (bool, Stri
         Err(e) => return (false, format!("orientation check: {e}")),
         Ok(_) => {}
     }
+    let baseline: Vec<_> = st.bodies.iter().filter(|b| export_names.is_empty() || export_names.iter().any(|n| n == &b.name)).collect();
     match solidcraft_engine::kernel::step_import(&text) {
         Ok(imp) if !imp.warnings.is_empty() => (false, format!("warnings: {}", imp.warnings.join("; "))),
-        Ok(imp) if imp.bodies.len() != st.bodies.len() => (false, format!("{} bodies back of {}", imp.bodies.len(), st.bodies.len())),
+        Ok(imp) if imp.bodies.len() != baseline.len() => (false, format!("{} bodies back of {}", imp.bodies.len(), baseline.len())),
         Ok(imp) => {
             let m: Vec<_> = imp.bodies.iter().filter_map(|b| solidcraft_engine::kernel::measure(&b.body).ok()).collect();
-            let m0: Vec<_> = st.bodies.iter().filter_map(|b| solidcraft_engine::kernel::measure(&b.body).ok()).collect();
+            let m0: Vec<_> = baseline.iter().filter_map(|b| solidcraft_engine::kernel::measure(&b.body).ok()).collect();
             let v: f64 = m.iter().map(|x| x.volume).sum();
             let (a, a0): (f64, f64) = (m.iter().map(|x| x.area).sum(), m0.iter().map(|x| x.area).sum());
             let faces: usize = imp.bodies.iter().map(|b| b.file_faces).sum();
             let faces0: usize = m0.iter().map(|x| x.merged.faces).sum();
             let close = |x: f64, y: f64| (x - y).abs() <= REL_TOL * y.abs().max(1.0);
-            let faces_raw: usize = st.bodies.iter().map(|b| b.body.face_count()).sum();
+            let faces_raw: usize = baseline.iter().map(|b| b.body.face_count()).sum();
             // (Fewer is fine: pieces of one plane, cylinder, cone, sphere or torus are written as one face.)
             let ok = close(v, volume) && close(a, a0) && faces <= faces_raw;
             (ok, format!("re-imported volume {v:.3} (was {volume:.3}), area {a:.3} (was {a0:.3}), faces {faces} (was {faces0})"))

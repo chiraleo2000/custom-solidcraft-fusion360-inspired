@@ -26,5 +26,5 @@
       2.0
     ]
   },
-  "note": "surface.patch leaves Sheet; surface.thicken adds Slab. Volume and COM are of the solid only (surface volume is zero)."
+  "note": "surface.patch leaves Sheet; surface.thicken adds Slab. Volume and COM are of the solid only (surface volume is zero). The oracle STEP round-trip exports the solid only when an open sheet remains beside it."
 }

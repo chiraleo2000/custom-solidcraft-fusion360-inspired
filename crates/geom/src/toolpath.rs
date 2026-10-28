@@ -541,14 +541,14 @@ mod tests {
     #[test]
     fn contour_and_pocket_respect_islands() {
         let outer = square();
-        let island = vec![Vec2::new(3.0, 3.0), Vec2::new(7.0, 3.0), Vec2::new(7.0, 7.0), Vec2::new(3.0, 7.0)];
+        let island = [Vec2::new(3.0, 3.0), Vec2::new(7.0, 3.0), Vec2::new(7.0, 7.0), Vec2::new(3.0, 7.0)];
         // Clockwise hole winding, as sketch regions store holes.
         let hole: Vec<Vec2> = island.iter().copied().rev().collect();
-        let contours = contour_passes(&outer, &[hole.clone()], 1.0).unwrap();
+        let contours = contour_passes(&outer, std::slice::from_ref(&hole), 1.0).unwrap();
         assert_eq!(contours.len(), 2, "{contours:?}");
         assert!((polygon_area(&contours[0]) - 144.0).abs() < 1e-6, "{:?}", contours[0]);
         assert!((polygon_area(&contours[1]) - 4.0).abs() < 1e-6, "{:?}", contours[1]);
-        let keepouts = island_keepouts(&[hole.clone()], 1.0).unwrap();
+        let keepouts = island_keepouts(std::slice::from_ref(&hole), 1.0).unwrap();
         assert!(point_in_closed(&keepouts[0], Vec2::new(5.0, 5.0)));
         assert!(point_in_closed(&keepouts[0], Vec2::new(2.5, 5.0)));
         assert!(!point_in_closed(&keepouts[0], Vec2::new(0.5, 0.5)));
