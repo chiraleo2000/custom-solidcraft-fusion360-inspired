@@ -939,8 +939,9 @@ pub enum FeatureKind {
     Remove {
         bodies: Vec<String>,
     },
-    /// Surface bodies: planar patches filling sketch regions (`profiles` of `sketch`), or a
-    /// closed loop of a body's edges (`edges`: points on them, on `body`).
+    /// Surface bodies: planar patches filling sketch regions (`profiles` of `sketch`), a closed
+    /// loop of a body's edges (`edges`: points on them, on `body`), or a mixed sketch outer with
+    /// edge picks (confirm-on-loop or one coplanar hole). Optional `guide` lifts a smooth sheet.
     Patch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sketch: Option<u64>,
@@ -1014,7 +1015,8 @@ pub enum FeatureKind {
     MeshConvert {
         body: String,
         tolerance: String,
-        /// `prismatic` merges coplanar facets. `faceted` keeps one face per triangle.
+        /// `prismatic` rebuilds constant-section planes/cylinders (organic meshes refused).
+        /// `faceted` keeps one face per triangle.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         mode: String,
     },
@@ -1051,17 +1053,18 @@ pub enum FeatureKind {
         length: String,
         width: String,
         thickness: String,
+        /// Legacy 4×4 grid pulls; kept for designs saved before cage `edits`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pulls: Vec<FormPull>,
         /// Cage edits replayed after `pulls`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         edits: Vec<FormEdit>,
-        /// `yz`, `xz` or `xy`.
+        /// Symmetry plane name: `yz`, `xz` or `xy`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         symmetry: Option<String>,
-        /// Control points kept sharp.
+        /// Cage edges kept sharp (endpoints become crease control points on eval).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        creases: Vec<u32>,
+        creases: Vec<CageEdgeRef>,
         /// `solid` or `surface`. Absent keeps the thickness field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finished: Option<String>,
@@ -1155,18 +1158,33 @@ pub enum FeatureKind {
     },
 }
 
-/// One recorded edit of a form cage.
+/// Index of a control vertex on the form cage (0…15 on the seed 4×4 grid).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CageVertRef(pub u32);
+
+/// Index of a quad face on the form cage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CageFaceRef(pub u32);
+
+/// Index of a cage edge (0…23 on the seed 4×4 grid).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CageEdgeRef(pub u32);
+
+/// One recorded edit of a form cage. Replayed in order after legacy `pulls`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FormEdit {
-    MovePoint { index: u32, delta: Vec3 },
-    InsertEdge { index: u32 },
-    InsertPoint { index: u32 },
+    MovePoint { index: CageVertRef, delta: Vec3 },
+    InsertEdge { index: CageEdgeRef },
+    InsertPoint { index: CageVertRef },
     Subdivide { level: u32 },
-    Bridge { a: u32, b: u32 },
-    Weld { index: u32 },
-    Crease { index: u32 },
-    ExtrudeFace { index: u32, delta: Vec3 },
+    Bridge { a: CageVertRef, b: CageVertRef },
+    Weld { index: CageVertRef },
+    Crease { index: CageEdgeRef },
+    ExtrudeFace { index: CageVertRef, delta: Vec3 },
 }
 
 /// One control-point move on a form grid.
@@ -1175,6 +1193,9 @@ pub struct FormPull {
     pub index: u32,
     pub delta: Vec3,
 }
+
+/// Hard cap on recorded cage edits; checked before form evaluation allocates.
+pub const MAX_FORM_EDITS: usize = 10_000;
 
 /// How a fillet's size is given.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2220,6 +2241,17 @@ pub struct DrawingSheet {
     /// `filled` or `open` — SolidCraft's own arrow style.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub arrows: String,
+    /// SolidCraft title-block layout: `iso` or `asme` (empty means `iso`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub template: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub drawn: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub date: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub material: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<DrawingPart>,
 }
@@ -2235,6 +2267,11 @@ impl DrawingSheet {
             title: String::new(),
             paper: String::new(),
             arrows: String::new(),
+            template: String::new(),
+            revision: String::new(),
+            drawn: String::new(),
+            date: String::new(),
+            material: String::new(),
             parts: Vec::new(),
         }
     }
@@ -2295,7 +2332,8 @@ fn f64_is_zero(value: &f64) -> bool {
     *value == 0.0
 }
 
-/// A support on a structural study. `kind` is `fixed` or `pin`. `target` is `min_x` or `max_x`.
+/// A support on a structural study. `kind` is `fixed` or `pin`.
+/// `target` is a box face: `min_x`/`max_x`/`min_y`/`max_y`/`min_z`/`max_z`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StudyConstraint {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2399,8 +2437,28 @@ pub struct EcadNet {
     pub nodes: Vec<String>,
 }
 
+/// Default copper layer index (top / L1).
+pub fn default_copper_layer() -> u32 {
+    1
+}
+
+fn copper_layer_is_top(layer: &u32) -> bool {
+    *layer <= 1
+}
+
+fn layers_is_one(layers: &u32) -> bool {
+    *layers <= 1
+}
+
+fn default_board_layers() -> u32 {
+    1
+}
+
 /// One copper segment, millimetres. `net` is empty when the segment was drawn without one.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// `layer` is 1-based: 1 = top, 2 = bottom, 3… = inner. Older files omit it and mean top.
+/// When `i`/`j` are set the segment is a circular arc (centre offset from the start), matching
+/// the public Gerber RS-274X I/J convention.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EcadTrace {
     pub x0: f64,
     pub y0: f64,
@@ -2409,16 +2467,62 @@ pub struct EcadTrace {
     pub width: f64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub net: String,
+    /// Copper layer, 1-based. Absent / 0 / 1 all mean the top layer.
+    #[serde(default = "default_copper_layer", skip_serializing_if = "copper_layer_is_top")]
+    pub layer: u32,
+    /// Arc centre offset from `(x0, y0)`, millimetres. Absent = linear draw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub i: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub j: Option<f64>,
+    /// Clockwise when the segment is an arc (Gerber G02). Ignored for linear draws.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clockwise: bool,
+}
+
+impl Default for EcadTrace {
+    fn default() -> Self {
+        Self { x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, width: 0.0, net: String::new(), layer: 1, i: None, j: None, clockwise: false }
+    }
+}
+
+impl EcadTrace {
+    /// True when this segment carries Gerber I/J arc offsets.
+    pub fn is_arc(&self) -> bool {
+        self.i.is_some() || self.j.is_some()
+    }
+}
+
+/// A filled copper polygon on one layer (Gerber G36/G37), millimetres.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EcadRegion {
+    pub points: Vec<[f64; 2]>,
+    #[serde(default = "default_copper_layer", skip_serializing_if = "copper_layer_is_top")]
+    pub layer: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub net: String,
 }
 
 /// PCB outline and copper. Checks read it and do not move it.
 /// PCB autorouting is not stored here; copper is only what was placed by hand.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Board {
     pub width: f64,
     pub height: f64,
+    /// Copper layer count, 1…8. Older designs omit it and mean one layer.
+    #[serde(default = "default_board_layers", skip_serializing_if = "layers_is_one")]
+    pub layers: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traces: Vec<EcadTrace>,
+    /// Filled copper regions (Gerber G36/G37), millimetres.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<EcadRegion>,
+}
+
+impl Default for Board {
+    fn default() -> Self {
+        Self { width: 0.0, height: 0.0, layers: 1, traces: Vec::new(), regions: Vec::new() }
+    }
 }
 
 /// Components, wires and the nets those wires form.
@@ -2442,6 +2546,13 @@ pub struct Schematic {
     pub nets: Vec<EcadNet>,
 }
 
+/// One cell of a generative lattice candidate (`origin` + `size`, millimetres).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GenerativeCell {
+    pub origin: [f64; 3],
+    pub size: [f64; 3],
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GenerativeStudy {
     pub name: String,
@@ -2454,7 +2565,7 @@ pub struct GenerativeStudy {
     pub loads: Vec<StudyLoad>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<StudyConstraint>,
-    /// Proposed box, millimetres. Zero until a solve records one.
+    /// Proposed box / lattice AABB, millimetres. Zero until a solve records one.
     #[serde(default, skip_serializing_if = "f64_is_zero")]
     pub length: f64,
     #[serde(default, skip_serializing_if = "f64_is_zero")]
@@ -2463,6 +2574,9 @@ pub struct GenerativeStudy {
     pub height: f64,
     #[serde(default, skip_serializing_if = "origin_is_zero")]
     pub origin: [f64; 3],
+    /// Structured-lattice cells. Empty for a single-box section-reduction candidate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<GenerativeCell>,
     #[serde(default)]
     pub stale: bool,
 }

@@ -729,7 +729,11 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
     let bodies = strs(&p, "bodies");
     match item.id.as_str() {
         "ui.repeat" => {
-            if let Some((id, _)) = app.last_command.clone() {
+            // Prefer the engine Repeat command (last JSON params). Fall back to re-starting the
+            // last interactive tool when only the UI mirror knows about it.
+            if app.session.last_command.is_some() {
+                let _ = app.run("ui.repeat_last", json!({}));
+            } else if let Some((id, _)) = app.last_command.clone() {
                 app.start(&id);
             }
         }
@@ -806,10 +810,8 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         "ui.export" => {
             let name = bodies.first().cloned().unwrap_or_else(|| app.session.doc.name.clone());
             // Public-specification formats only; proprietary vendor extensions are refused by file.export.
-            const EXTS: &[&str] = &[
-                "step", "stp", "igs", "iges", "stl", "3mf", "obj", "mtl", "gltf", "glb", "ply", "amf", "dae", "x3d", "wrl", "vrm", "usda",
-                "usd",
-            ];
+            const EXTS: &[&str] =
+                &["step", "stp", "igs", "iges", "stl", "3mf", "obj", "mtl", "gltf", "glb", "ply", "amf", "dae", "x3d", "wrl", "vrm", "usda", "usd"];
             if let Some(path) = app.services.pick_save.as_ref().and_then(|f| f(&format!("{name}.step"), EXTS)) {
                 let _ = app.run("file.export", json!({ "path": path, "bodies": bodies }));
             }

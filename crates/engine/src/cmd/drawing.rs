@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use solidcraft_doc::{DrawingCurve, DrawingNote, DrawingPart, DrawingSheet, DrawingView};
 use solidcraft_geom::drawing::{self, DetailWindow, ProjEdge, ProjRequest, ProjTri, SectionPlane, ViewFrame};
 use solidcraft_geom::{Aabb3, Vec3};
-use solidcraft_io::{DrawKind, DrawSeg, DrawText, write_drawing_dxf, write_drawing_pdf, write_drawing_svg};
+use solidcraft_io::{DrawKind, DrawSeg, DrawText, write_drawing_dxf, write_drawing_pdf_titled, write_drawing_svg};
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, str_, vec3};
@@ -55,6 +55,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("sketch")
         .params("sheet?; standard: first_angle|third_angle|iso|asme; arrows?: filled|open"),
     CommandSpec::new("drawing.export_pdf", "Export Drawing PDF", export_pdf)
+        .at("DRAWING", "CREATE")
+        .icon("sketch")
         .noundo()
         .params("sheet?; path: a PDF file (ISO 32000-1). The page is A4 or A3 landscape"),
 ];
@@ -517,6 +519,14 @@ fn standard(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"standard": name, "arrows": arrows_out}))
 }
 
+fn field_of(cmd: &str, p: &Value, key: &str) -> Result<Option<String>> {
+    let Some(raw) = str_(p, key) else { return Ok(None) };
+    if raw.len() > 200 {
+        return Err(bad(cmd, format!("{key} is too long")));
+    }
+    Ok(Some(raw.to_string()))
+}
+
 pub(super) fn title_block(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "drawing.title_block";
     unsupported(cmd, p)?;
@@ -524,14 +534,36 @@ pub(super) fn title_block(s: &mut Session, p: &Value) -> Result<Value> {
     if !matches!(size, "A4" | "A3") {
         return Err(bad(cmd, "size must be A4 or A3"));
     }
+    let template = match str_(p, "template").unwrap_or("iso") {
+        "iso" | "ISO" => "iso",
+        "asme" | "ASME" => "asme",
+        other => return Err(bad(cmd, format!("template must be iso or asme (got {other})"))),
+    };
     let title = str_(p, "title").unwrap_or("SolidCraft");
     if title.len() > 200 {
         return Err(bad(cmd, "title is too long"));
     }
+    let revision = field_of(cmd, p, "revision")?;
+    let drawn = field_of(cmd, p, "drawn")?;
+    let date = field_of(cmd, p, "date")?;
+    let material = field_of(cmd, p, "material")?;
     let i = sheet_index(s, p)?;
     let Some(sheet) = s.doc_mut().drawings.get_mut(i) else { return Err(bad(cmd, "no drawing sheet")) };
     sheet.title = title.to_string();
     sheet.paper = size.to_string();
+    sheet.template = template.to_string();
+    if let Some(v) = revision {
+        sheet.revision = v;
+    }
+    if let Some(v) = drawn {
+        sheet.drawn = v;
+    }
+    if let Some(v) = date {
+        sheet.date = v;
+    }
+    if let Some(v) = material {
+        sheet.material = v;
+    }
     sheet.svg.clear();
     if let Some(existing) = sheet.notes.iter_mut().find(|n| n.kind == "title") {
         existing.text = title.to_string();
@@ -540,7 +572,15 @@ pub(super) fn title_block(s: &mut Session, p: &Value) -> Result<Value> {
         note.kind = "title".into();
         sheet.notes.push(note);
     }
-    Ok(json!({"title": title, "size": size}))
+    Ok(json!({
+        "title": title,
+        "size": size,
+        "template": template,
+        "revision": sheet.revision,
+        "drawn": sheet.drawn,
+        "date": sheet.date,
+        "material": sheet.material,
+    }))
 }
 
 pub(super) fn parts_list(s: &mut Session, p: &Value) -> Result<Value> {
@@ -591,35 +631,62 @@ fn build_parts(doc: &solidcraft_doc::Document) -> Vec<DrawingPart> {
     parts
 }
 
+fn export_meta(sheet: &DrawingSheet, segs: usize, lost: Vec<String>) -> Value {
+    json!({
+        "sheet": sheet.name,
+        "lines": segs,
+        "lost": lost,
+        "paper": if sheet.paper.is_empty() { "A4" } else { sheet.paper.as_str() },
+        "standard": if sheet.standard.is_empty() { "third_angle" } else { sheet.standard.as_str() },
+        "template": if sheet.template.is_empty() { "iso" } else { sheet.template.as_str() },
+        "parts": sheet.parts.len(),
+        "title": sheet.title,
+    })
+}
+
 fn export_svg(s: &mut Session, p: &Value) -> Result<Value> {
     let i = sheet_index(s, p)?;
     let draw = compose_sheet(s, i)?;
     let svg = write_drawing_svg(&draw.segs, &draw.texts);
-    let (name, lost) = {
+    let meta = {
         let Some(slot) = s.doc_mut().drawings.get_mut(i) else { return Err(bad("drawing.export_svg", "no drawing sheet")) };
         slot.svg = svg.clone();
-        (slot.name.clone(), lost_report(slot))
+        let lost = lost_report(slot);
+        let mut meta = export_meta(slot, draw.segs.len(), lost);
+        meta["svg"] = json!(svg);
+        meta
     };
     s.refresh();
-    Ok(json!({"sheet": name, "svg": svg, "lines": draw.segs.len(), "lost": lost}))
+    Ok(meta)
 }
 
 fn export_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "drawing.export_pdf";
     let path = str_(p, "path").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`path` is required"))?;
+    if path.len() > 4_000 {
+        return Err(bad(cmd, "path is too long"));
+    }
     let i = sheet_index(s, p).map_err(|_| bad(cmd, "no drawing sheet"))?;
     let draw = compose_sheet(s, i)?;
     let sheet = s.doc.drawings.get(i).cloned().ok_or_else(|| bad(cmd, "no drawing sheet"))?;
     let page = paper_mm(&sheet.paper);
-    let pdf = write_drawing_pdf(page, &draw.segs, &draw.texts);
+    let title = if sheet.title.is_empty() { "SolidCraft" } else { sheet.title.as_str() };
+    let pdf = write_drawing_pdf_titled(page, title, &draw.segs, &draw.texts);
     std::fs::write(path, pdf).map_err(|e| bad(cmd, e.to_string()))?;
     let outline = sheet.views.iter().map(|v| v.outline).fold(0.0, f64::max);
-    Ok(json!({"path": path, "outline": outline, "lines": draw.segs.len(), "lost": lost_report(&sheet)}))
+    let mut meta = export_meta(&sheet, draw.segs.len(), lost_report(&sheet));
+    meta["path"] = json!(path);
+    meta["outline"] = json!(outline);
+    meta["page_mm"] = json!(page);
+    Ok(meta)
 }
 
 pub(super) fn export_dxf(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "drawing.export_dxf";
     let path = str_(p, "path").filter(|n| !n.is_empty()).ok_or_else(|| bad(cmd, "`path` is required"))?;
+    if path.len() > 4_000 {
+        return Err(bad(cmd, "path is too long"));
+    }
     let i = sheet_index(s, p).map_err(|_| bad(cmd, "no drawing sheet"))?;
     let draw = compose_sheet(s, i)?;
     let lines = draw.segs.iter().filter(|seg| matches!(seg.kind, DrawKind::Visible | DrawKind::Hidden | DrawKind::Section)).count();
@@ -628,8 +695,10 @@ pub(super) fn export_dxf(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let dxf = write_drawing_dxf(&draw.segs, &draw.texts);
     std::fs::write(path, dxf).map_err(|e| bad(cmd, e.to_string()))?;
-    let lost = s.doc.drawings.get(i).map(lost_report).unwrap_or_default();
-    Ok(json!({"path": path, "lines": lines, "lost": lost}))
+    let sheet = s.doc.drawings.get(i).cloned().ok_or_else(|| bad(cmd, "no drawing sheet"))?;
+    let mut meta = export_meta(&sheet, lines, lost_report(&sheet));
+    meta["path"] = json!(path);
+    Ok(meta)
 }
 
 fn compose_sheet(s: &mut Session, i: usize) -> Result<SheetDraw> {
@@ -760,6 +829,7 @@ fn update_dimension(sheet: &mut DrawingSheet, ni: usize, geoms: &[BodyGeom]) {
     }
     let target = note.target.clone();
     let axis = note.axis.clone();
+    let view_i = note.view;
     let Some(body) = geoms.iter().find(|g| g.name == target) else {
         if let Some(note) = sheet.notes.get_mut(ni) {
             note.lost = true;
@@ -767,11 +837,49 @@ fn update_dimension(sheet: &mut DrawingSheet, ni: usize, geoms: &[BodyGeom]) {
         return;
     };
     let measured = axis_extent(body.bounds, &axis);
+    let placed = view_i.and_then(|i| sheet.views.get(i)).or_else(|| sheet.views.last());
+    let at = placed.and_then(|view| dim_anchor(view, body.bounds, &axis));
     if let Some(note) = sheet.notes.get_mut(ni) {
         note.measured = measured;
         note.text = format_mm(measured);
         note.lost = false;
+        if let Some(at) = at {
+            note.at = at;
+        }
     }
+}
+
+/// Sheet position for a body linear dimension, just outside the projected extent.
+fn dim_anchor(view: &DrawingView, bounds: Aabb3, axis: &str) -> Option<[f64; 2]> {
+    if bounds.is_empty() {
+        return None;
+    }
+    let frame = ViewFrame::looking(view.direction)?;
+    let scale = parse_scale(&view.scale);
+    let mut minu = f64::INFINITY;
+    let mut maxu = f64::NEG_INFINITY;
+    let mut minv = f64::INFINITY;
+    let mut maxv = f64::NEG_INFINITY;
+    for x in [bounds.min.x, bounds.max.x] {
+        for y in [bounds.min.y, bounds.max.y] {
+            for z in [bounds.min.z, bounds.max.z] {
+                let p = frame.project(Vec3::new(x, y, z));
+                minu = minu.min(p[0]);
+                maxu = maxu.max(p[0]);
+                minv = minv.min(p[1]);
+                maxv = maxv.max(p[1]);
+            }
+        }
+    }
+    if !minu.is_finite() {
+        return None;
+    }
+    let (u, v) = match axis {
+        "y" => ((minu + maxu) * 0.5, maxv + 4.0 / scale.max(1e-9)),
+        "z" => ((minu + maxu) * 0.5, minv - 4.0 / scale.max(1e-9)),
+        _ => (maxu + 4.0 / scale.max(1e-9), (minv + maxv) * 0.5),
+    };
+    Some([view.origin[0] + u * scale, view.origin[1] + v * scale])
 }
 
 fn update_center(sheet: &mut DrawingSheet, ni: usize, geoms: &[BodyGeom]) {
@@ -1165,6 +1273,8 @@ fn add_centerline(segs: &mut Vec<DrawSeg>, at: [f64; 2], measured: f64) {
 
 fn add_balloon(segs: &mut Vec<DrawSeg>, texts: &mut Vec<DrawText>, at: [f64; 2], label: &str) {
     let r = 4.0;
+    let tip = [at[0] - 12.0, at[1] - 8.0];
+    push_seg(segs, tip, [at[0] - r * 0.7, at[1] - r * 0.7], DrawKind::Annotation);
     let mut prev = None;
     let mut first = None;
     for i in 0..8 {
@@ -1185,32 +1295,58 @@ fn add_balloon(segs: &mut Vec<DrawSeg>, texts: &mut Vec<DrawText>, at: [f64; 2],
 }
 
 fn add_title_block(segs: &mut Vec<DrawSeg>, texts: &mut Vec<DrawText>, sheet: &DrawingSheet, bounds: (f64, f64, f64, f64)) {
-    if sheet.title.is_empty() && sheet.paper.is_empty() {
+    if sheet.title.is_empty() && sheet.paper.is_empty() && sheet.template.is_empty() {
         return;
     }
     let x = if bounds.2.is_finite() { bounds.2 + 12.0 } else { 0.0 };
     let y = if bounds.1.is_finite() { bounds.1 } else { 0.0 };
-    let (w, h) = (140.0, 36.0);
-    for row in [0.0, 9.0, 18.0, 27.0, 36.0] {
+    let asme = sheet.template == "asme";
+    let (w, h) = if asme { (150.0, 42.0) } else { (140.0, 36.0) };
+    let rows: &[f64] = if asme { &[0.0, 8.4, 16.8, 25.2, 33.6, 42.0] } else { &[0.0, 9.0, 18.0, 27.0, 36.0] };
+    for row in rows {
         push_seg(segs, [x, y + row], [x + w, y + row], DrawKind::Title);
     }
     push_seg(segs, [x, y], [x, y + h], DrawKind::Title);
     push_seg(segs, [x + w, y], [x + w, y + h], DrawKind::Title);
-    push_seg(segs, [x + 70.0, y], [x + 70.0, y + 18.0], DrawKind::Title);
-    push_seg(segs, [x + 70.0, y + 27.0], [x + 70.0, y + h], DrawKind::Title);
+    let mid = if asme { 80.0 } else { 70.0 };
+    push_seg(segs, [x + mid, y], [x + mid, y + h], DrawKind::Title);
+    if asme {
+        push_seg(segs, [x + 40.0, y], [x + 40.0, y + 16.8], DrawKind::Title);
+        push_seg(segs, [x + 115.0, y + 25.2], [x + 115.0, y + h], DrawKind::Title);
+    }
     let paper = if sheet.paper.is_empty() { "A4" } else { sheet.paper.as_str() };
     let scale = sheet.views.first().map(|v| scale_label(&v.scale)).unwrap_or_else(|| "1:1".into());
     let standard = if sheet.standard == "first_angle" { "First angle" } else { "Third angle" };
     let arrows = if sheet.arrows.is_empty() { "filled" } else { sheet.arrows.as_str() };
     let title = if sheet.title.is_empty() { "SolidCraft" } else { sheet.title.as_str() };
-    add_text(texts, [x + 2.0, y + 28.5], "SolidCraft", 3.2, DrawKind::Title);
-    add_text(texts, [x + 72.0, y + 28.5], paper, 3.2, DrawKind::Title);
-    add_text(texts, [x + 2.0, y + 19.5], title, 3.5, DrawKind::Title);
-    add_text(texts, [x + 2.0, y + 10.5], standard, 3.0, DrawKind::Title);
-    add_text(texts, [x + 72.0, y + 10.5], &scale, 3.0, DrawKind::Title);
-    add_text(texts, [x + 2.0, y + 2.0], &sheet.name, 3.0, DrawKind::Title);
-    add_text(texts, [x + 72.0, y + 2.0], arrows, 3.0, DrawKind::Title);
-    add_arrow(segs, [x + 110.0, y + 4.0], arrows);
+    let rev = if sheet.revision.is_empty() { "-" } else { sheet.revision.as_str() };
+    let drawn = if sheet.drawn.is_empty() { "-" } else { sheet.drawn.as_str() };
+    let date = if sheet.date.is_empty() { "-" } else { sheet.date.as_str() };
+    let material = if sheet.material.is_empty() { "-" } else { sheet.material.as_str() };
+    if asme {
+        add_text(texts, [x + 2.0, y + 35.0], "SolidCraft", 3.0, DrawKind::Title);
+        add_text(texts, [x + 82.0, y + 35.0], paper, 3.0, DrawKind::Title);
+        add_text(texts, [x + 117.0, y + 35.0], &format!("Rev {rev}"), 3.0, DrawKind::Title);
+        add_text(texts, [x + 2.0, y + 26.5], title, 3.4, DrawKind::Title);
+        add_text(texts, [x + 82.0, y + 26.5], &scale, 3.0, DrawKind::Title);
+        add_text(texts, [x + 2.0, y + 18.0], standard, 2.8, DrawKind::Title);
+        add_text(texts, [x + 82.0, y + 18.0], material, 2.8, DrawKind::Title);
+        add_text(texts, [x + 2.0, y + 9.5], &format!("Drawn {drawn}"), 2.8, DrawKind::Title);
+        add_text(texts, [x + 42.0, y + 9.5], date, 2.8, DrawKind::Title);
+        add_text(texts, [x + 82.0, y + 9.5], &sheet.name, 2.8, DrawKind::Title);
+        add_text(texts, [x + 2.0, y + 1.5], arrows, 2.8, DrawKind::Title);
+        add_arrow(segs, [x + 120.0, y + 2.5], arrows);
+    } else {
+        add_text(texts, [x + 2.0, y + 28.5], "SolidCraft", 3.2, DrawKind::Title);
+        add_text(texts, [x + 72.0, y + 28.5], paper, 3.2, DrawKind::Title);
+        add_text(texts, [x + 2.0, y + 19.5], title, 3.5, DrawKind::Title);
+        add_text(texts, [x + 72.0, y + 19.5], &format!("Rev {rev}"), 3.0, DrawKind::Title);
+        add_text(texts, [x + 2.0, y + 10.5], standard, 3.0, DrawKind::Title);
+        add_text(texts, [x + 72.0, y + 10.5], &scale, 3.0, DrawKind::Title);
+        add_text(texts, [x + 2.0, y + 2.0], &format!("{drawn} {date}"), 2.8, DrawKind::Title);
+        add_text(texts, [x + 72.0, y + 2.0], material, 2.8, DrawKind::Title);
+        add_arrow(segs, [x + 118.0, y + 20.0], arrows);
+    }
 }
 
 fn add_arrow(segs: &mut Vec<DrawSeg>, at: [f64; 2], style: &str) {

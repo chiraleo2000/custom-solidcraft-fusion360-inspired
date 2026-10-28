@@ -1,0 +1,39 @@
+{
+  "id": "pdf_day14_constraints",
+  "day": 14,
+  "title": "Sketch constraints drill",
+  "description": "Rectangle plus AutoConstrain reduces freedom; inspect reports DOF.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Free"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [0, 0],
+        "p1": [30, 20]
+      }
+    },
+    {
+      "command": "sketch.inspect",
+      "params": {}
+    },
+    {
+      "command": "sketch.auto_constrain",
+      "params": {}
+    },
+    {
+      "command": "sketch.inspect",
+      "params": {}
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    }
+  ]
+}

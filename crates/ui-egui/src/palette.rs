@@ -44,7 +44,8 @@ pub fn rank(q: &str, id: &str, label: &str, synonyms: &[String]) -> Option<u8> {
     None
 }
 
-fn synonyms_of(id: &str) -> Vec<String> {
+/// Locale synonyms for a command (`palette.synonyms.<id>`), used by the palette and the S-box.
+pub(crate) fn synonyms_of(id: &str) -> Vec<String> {
     let key = format!("palette.synonyms.{id}");
     let text = crate::i18n::tr(&key).to_string();
     if text == key {

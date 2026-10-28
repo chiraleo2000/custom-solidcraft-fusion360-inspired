@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 use solidcraft_doc::{FeatureKind, PlaneRef, expr::Kind};
+use solidcraft_geom::{Plane, Vec3};
 
 use super::CommandSpec;
 use super::features::{add_feature, plane_param};
@@ -15,32 +16,52 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("mold.box", "Mold Box", box_cmd)
         .at("SOLID", "CREATE")
         .icon("box")
-        .params("body: prototype name; margin?: expr (default 5 mm); name?"),
+        .params("body: prototype name; margin?: expr (default 5 mm); name?, body_name?"),
     CommandSpec::new("mold.cavity", "Mold Cavity", cavity)
         .at("SOLID", "MODIFY")
         .icon("combine")
-        .params("mold: box body; tool: prototype body (kept)"),
-    CommandSpec::new("mold.split", "Split Mold", split)
-        .at("SOLID", "MODIFY")
-        .icon("split")
-        .params("body: mold name; plane: XY|XZ|YZ|plane|{origin, normal}"),
+        .params("mold: box body; tool: prototype body (kept — same as combine cut with keep_tools)"),
+    CommandSpec::new("mold.split", "Split Mold", split).at("SOLID", "MODIFY").icon("split").params(
+        "body: mold name; plane?: XY|XZ|YZ|plane|{origin, normal} (default: mid-height parting through the mold AABB, Z-up); \
+             body_names?: [lower, upper] preferred half names",
+    ),
     CommandSpec::new("mold.alignment_pins", "Alignment Pins", pins)
         .at("SOLID", "CREATE")
         .icon("hole")
-        .params("upper, lower: half names; diameter, depth: expr"),
-    CommandSpec::new("mold.pour_spout", "Pour Spout", spout).at("SOLID", "MODIFY").icon("extrude").params("body: mold name; width, depth: expr"),
+        .params("upper, lower: half names; diameter, depth: expr (bosses on upper, matching holes in lower at the four parting corners)"),
+    CommandSpec::new("mold.pour_spout", "Pour Spout", spout)
+        .at("SOLID", "MODIFY")
+        .icon("extrude")
+        .params("body: mold name; width, depth: expr (channel cut from the outer −Y face into the cavity)"),
     CommandSpec::new("dfam.clearance", "Clearance Gap", clearance)
         .at("SOLID", "MODIFY")
         .icon("offset")
-        .params("body: name; gap: expr (faces move inward)"),
+        .params("body: name; gap: expr (faces move inward; a parameter name re-evaluates on change)"),
     CommandSpec::new("dfam.nest", "Nest Bodies", nest)
         .at("SOLID", "MODIFY")
         .icon("rect")
-        .params("bodies: [names]; width, depth: bed size; gap?: expr"),
+        .params("bodies: [unique names]; width, depth: bed size; gap?: expr (tallest-first shelf pack)"),
 ];
 
 fn require_body(s: &Session, name: &str, cmd: &str) -> Result<()> {
     if s.model.state().body(name).is_none() { Err(bad(cmd, format!("no body `{name}`"))) } else { Ok(()) }
+}
+
+/// Mid-height XY parting through the mold's AABB — the usual two-part guidance when no plane is given.
+fn mid_height_parting(s: &Session, body: &str, cmd: &str) -> Result<PlaneRef> {
+    let state = s.model.state();
+    let mb = state.body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
+    let bb = mb.mesh().bounds();
+    if bb.is_empty() {
+        return Err(bad(cmd, "the mold has no size to part"));
+    }
+    let mid = (bb.min.z + bb.max.z) * 0.5;
+    if !(mid.is_finite()) {
+        return Err(bad(cmd, "the mold bounds are not finite"));
+    }
+    let plane =
+        Plane::from_normal(Vec3::new(bb.center().x, bb.center().y, mid), Vec3::Z).ok_or_else(|| bad(cmd, "could not build a parting plane"))?;
+    Ok(PlaneRef::Custom { plane })
 }
 
 fn box_cmd(s: &mut Session, p: &Value) -> Result<Value> {
@@ -68,14 +89,47 @@ fn split(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "mold.split";
     let body = str_(p, "body").filter(|b| !b.is_empty()).ok_or_else(|| bad(cmd, "`body` is required"))?.to_string();
     require_body(s, &body, cmd)?;
-    let plane = if p.get("plane").is_none() { PlaneRef::Origin { name: "XY".into() } } else { plane_param(s, p.get("plane"), cmd)? };
-    add_feature(s, p, FeatureKind::MoldSplit { body, plane })
+    let defaulted = p.get("plane").is_none();
+    let plane = if defaulted { mid_height_parting(s, &body, cmd)? } else { plane_param(s, p.get("plane"), cmd)? };
+    let named = crate::params::string_list(p, "body_names");
+    let mut out = add_feature(s, p, FeatureKind::MoldSplit { body: body.clone(), plane })?;
+    // Parting guidance: lower = below the plane, upper = above (also the `body_names` order).
+    let st = s.world_state();
+    let (lower, upper) = if named.len() >= 2 && st.body(&named[0]).is_some() && st.body(&named[1]).is_some() {
+        (named[0].clone(), named[1].clone())
+    } else {
+        let fid = out.get("feature").and_then(Value::as_u64);
+        let mut halves: Vec<(String, f64)> = st
+            .bodies
+            .iter()
+            .filter(|b| fid == Some(b.feature) || b.name == body || b.name == "MoldLower" || b.name == "MoldUpper")
+            .map(|b| (b.name.clone(), b.mesh().bounds().center().z))
+            .collect();
+        halves.sort_by(|a, b| a.1.total_cmp(&b.1));
+        halves.dedup_by(|a, b| a.0 == b.0);
+        match halves.as_slice() {
+            [lo, .., hi] if lo.0 != hi.0 => (lo.0.clone(), hi.0.clone()),
+            _ => (String::new(), String::new()),
+        }
+    };
+    if !lower.is_empty() && !upper.is_empty() {
+        out["parting"] = serde_json::json!({
+            "lower": lower,
+            "upper": upper,
+            "default_mid_height": defaulted,
+            "guidance": "alignment pins: upper gets bosses, lower gets holes; pour spout usually on the lower half",
+        });
+    }
+    Ok(out)
 }
 
 fn pins(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "mold.alignment_pins";
     let upper = str_(p, "upper").filter(|b| !b.is_empty()).ok_or_else(|| bad(cmd, "`upper` is required"))?.to_string();
     let lower = str_(p, "lower").filter(|b| !b.is_empty()).ok_or_else(|| bad(cmd, "`lower` is required"))?.to_string();
+    if upper == lower {
+        return Err(bad(cmd, "the pin halves must be different bodies"));
+    }
     require_body(s, &upper, cmd)?;
     require_body(s, &lower, cmd)?;
     let diameter = crate::params::req_expr(cmd, p, "diameter")?;
@@ -111,7 +165,14 @@ fn nest(s: &mut Session, p: &Value) -> Result<Value> {
     if bodies.is_empty() || bodies.len() > MAX_NEST {
         return Err(bad(cmd, "`bodies` must list 1…256 bodies"));
     }
+    if bodies.iter().any(|n| n.is_empty()) {
+        return Err(bad(cmd, "`bodies` must list non-empty names"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
     for name in &bodies {
+        if !seen.insert(name.as_str()) {
+            return Err(bad(cmd, format!("`bodies` lists `{name}` more than once")));
+        }
         require_body(s, name, cmd)?;
     }
     let width = crate::params::req_expr(cmd, p, "width")?;
@@ -162,6 +223,48 @@ mod tests {
         let overlap_x = a.min.x < b.max.x && b.min.x < a.max.x;
         let overlap_y = a.min.y < b.max.y && b.min.y < a.max.y;
         assert!(!(overlap_x && overlap_y), "a {a:?} b {b:?}");
+    }
+
+    /// Default parting is mid-height; pins add four bosses/holes; spout removes volume.
+    #[test]
+    fn default_parting_pins_and_spout_deepen_a_two_part_mold() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 20, "width": 16, "height": 12, "body_name": "Part"}));
+        run(&mut s, "mold.box", json!({"body": "Part", "margin": "6", "body_name": "Mold"}));
+        run(&mut s, "mold.cavity", json!({"mold": "Mold", "tool": "Part"}));
+        assert!(s.world_state().body("Part").is_some(), "cavity keeps the tool");
+        let before_split = solidcraft_kernel::measure(&s.world_state().body("Mold").unwrap().body).unwrap().volume;
+        let split = run(&mut s, "mold.split", json!({"body": "Mold", "body_names": ["Lower", "Upper"]}));
+        assert_eq!(split["parting"]["lower"], "Lower", "{split}");
+        assert_eq!(split["parting"]["upper"], "Upper", "{split}");
+        assert_eq!(split["parting"]["default_mid_height"], true, "{split}");
+        let st = s.world_state();
+        let lower = st.body("Lower").expect("lower half");
+        let upper = st.body("Upper").expect("upper half");
+        let halves = solidcraft_kernel::measure(&lower.body).unwrap().volume + solidcraft_kernel::measure(&upper.body).unwrap().volume;
+        assert!((halves - before_split).abs() < 1e-2, "split union {halves} vs {before_split}");
+
+        let upper_name = upper.name.clone();
+        let lower_name = lower.name.clone();
+        let before_pins = solidcraft_kernel::measure(&s.world_state().body(&upper_name).unwrap().body).unwrap().volume;
+        run(&mut s, "mold.alignment_pins", json!({"upper": upper_name, "lower": lower_name, "diameter": "3", "depth": "4"}));
+        let after_pins = solidcraft_kernel::measure(&s.world_state().body(&upper_name).unwrap().body).unwrap().volume;
+        assert!(after_pins > before_pins + 1.0, "pins add bosses: {before_pins} -> {after_pins}");
+
+        let before_spout = solidcraft_kernel::measure(&s.world_state().body(&lower_name).unwrap().body).unwrap().volume;
+        run(&mut s, "mold.pour_spout", json!({"body": lower_name, "width": "4", "depth": "8"}));
+        let after_spout = solidcraft_kernel::measure(&s.world_state().body(&lower_name).unwrap().body).unwrap().volume;
+        assert!(after_spout < before_spout - 1.0, "spout removes material: {before_spout} -> {after_spout}");
+        assert!(s.world_state().body("Part").is_some());
+    }
+
+    #[test]
+    fn nest_rejects_duplicate_bodies_without_changing_the_design() {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 8, "width": 8, "height": 3, "body_name": "A"}));
+        let before = s.doc.to_json();
+        assert!(s.execute("dfam.nest", &json!({"bodies": ["A", "A"], "width": "40", "depth": "40", "gap": "1"})).is_err());
+        assert_eq!(s.doc.to_json(), before);
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("mesh.convert", "Convert Mesh", convert)
         .at("MESH", "MODIFY")
         .icon("import")
-        .params("body: mesh body name; mode?: prismatic|faceted (prismatic merges coplanar facets, faceted keeps a face per triangle); tolerance?: length expression (default 0.05 mm, prismatic only); name?"),
+        .params("body: mesh body name; mode?: prismatic|faceted (prismatic reconstructs constant-section planes/cylinders, faceted keeps a face per triangle; organic meshes are refused in prismatic); tolerance?: length expression (default 0.05 mm, prismatic only); name?"),
     CommandSpec::new("mesh.plane_cut", "Plane Cut", plane_cut)
         .at("MESH", "PREPARE")
         .icon("split")
@@ -31,15 +31,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("MESH", "PREPARE")
         .icon("import")
         .noundo()
-        .params("body: mesh body name. Groups triangles by which axis their normal faces"),
+        .params("body: mesh body name. Partitions triangles by dihedral-angle region growing (≤30° across shared edges)"),
     CommandSpec::new("mesh.section", "Mesh Section", section)
         .at("MESH", "CREATE")
         .icon("sketch")
-        .params("body: mesh body name; origin: [x,y,z]; normal: [x,y,z]; name?: sketch name. Draws every closed cut loop as sketch lines"),
+        .params("body: mesh body name; origin: [x,y,z]; normal: [x,y,z]; name?: sketch name. Draws every ordered closed cut loop as sketch lines"),
     CommandSpec::new("mesh.remesh", "Remesh", remesh)
         .at("MESH", "MODIFY")
         .icon("import")
-        .params("body: mesh body name; target: triangle count"),
+        .params("body: mesh body name; target: triangle count (1…MAX_MESH_TRIS)"),
     CommandSpec::new("mesh.smooth", "Smooth Mesh", smooth)
         .at("MESH", "MODIFY")
         .icon("fillet")
@@ -164,7 +164,7 @@ fn remesh(s: &mut Session, p: &Value) -> Result<Value> {
         let Some(v) = n.as_f64() else {
             return Err(bad(cmd, "remesh target is out of range"));
         };
-        if !v.is_finite() || v < 1.0 || v > solidcraft_kernel::MAX_TRIANGLES as f64 {
+        if !v.is_finite() || v < 1.0 || v > solidcraft_kernel::MAX_MESH_TRIS as f64 {
             return Err(bad(cmd, "remesh target is out of range"));
         }
     }

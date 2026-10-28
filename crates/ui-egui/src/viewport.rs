@@ -1245,7 +1245,7 @@ fn pick_kind_off(app: &SolveApp, kind: &str) -> bool {
 }
 
 /// Per-component display tint from the theme. It is a view setting, not a stored appearance.
-fn component_tint(t: &Tokens, component: u64) -> Color32 {
+pub(crate) fn component_tint(t: &Tokens, component: u64) -> Color32 {
     let palette = [t.accent, t.sketch_accent, t.preview_add, t.warning, t.manipulator, t.sel_face, t.body_selected, t.section_cap];
     let n = usize::try_from(component % palette.len() as u64).unwrap_or(0);
     palette.get(n).copied().unwrap_or(t.body)
@@ -2863,19 +2863,44 @@ fn axis_rect(app: &SolveApp, rect: Rect) -> Rect {
         .unwrap_or_else(|| Rect::from_center_size(pos2(rect.right() - 68.0, rect.top() + 68.0), vec2(116.0, 116.0)))
 }
 
-/// Six signed world axes, sorted back to front so overlapping tips have one owner.
-fn axis_tips(cam: &Camera, c: Pos2) -> Vec<(&'static str, Vec3, Pos2, f64)> {
+/// Axis face tips plus edge and corner diagonals (the 26 `view.orient` directions), sorted
+/// back to front so overlapping tips have one owner. Faces keep the large hit radius; edges and
+/// corners use a smaller one so faces stay easy to click.
+fn axis_tips(cam: &Camera, c: Pos2) -> Vec<(&'static str, Vec3, Pos2, f64, f32)> {
     let (r, u, b) = cam.basis();
-    let mut tips: Vec<_> = [("x", Vec3::X), ("-x", -Vec3::X), ("y", Vec3::Y), ("-y", -Vec3::Y), ("z", Vec3::Z), ("-z", -Vec3::Z)]
-        .into_iter()
-        .map(|(name, d)| (name, d, c + vec2((d.dot(r) * AXIS_LENGTH) as f32, -(d.dot(u) * AXIS_LENGTH) as f32), d.dot(b)))
-        .collect();
+    let mut tips = Vec::with_capacity(26);
+    for dir in solidcraft_engine::render::view_directions() {
+        let Some(d) = solidcraft_engine::render::eye_direction(dir) else { continue };
+        let nonzero = i8::from(dir[0] != 0) + i8::from(dir[1] != 0) + i8::from(dir[2] != 0);
+        let (name, radius, length) = match nonzero {
+            1 => {
+                let name = if dir[0] == 1 {
+                    "x"
+                } else if dir[0] == -1 {
+                    "-x"
+                } else if dir[1] == 1 {
+                    "y"
+                } else if dir[1] == -1 {
+                    "-y"
+                } else if dir[2] == 1 {
+                    "z"
+                } else {
+                    "-z"
+                };
+                (name, AXIS_RADIUS, AXIS_LENGTH)
+            }
+            2 => ("", AXIS_RADIUS * 0.55, AXIS_LENGTH * 0.82),
+            _ => ("", AXIS_RADIUS * 0.45, AXIS_LENGTH * 0.72),
+        };
+        let at = c + vec2((d.dot(r) * length) as f32, -(d.dot(u) * length) as f32);
+        tips.push((name, d, at, d.dot(b), radius));
+    }
     tips.sort_by(|a, b| a.3.total_cmp(&b.3));
     tips
 }
 
-fn axis_hit(tips: &[(&str, Vec3, Pos2, f64)], p: Pos2) -> Option<usize> {
-    tips.iter().enumerate().rev().find(|(_, (_, _, at, _))| at.distance(p) <= AXIS_RADIUS).map(|(i, _)| i)
+fn axis_hit(tips: &[(&str, Vec3, Pos2, f64, f32)], p: Pos2) -> Option<usize> {
+    tips.iter().enumerate().rev().find(|(_, (_, _, at, _, radius))| at.distance(p) <= *radius).map(|(i, _)| i)
 }
 
 /// Six principal views, twelve edge diagonals and eight isometric corner directions.
@@ -3015,33 +3040,38 @@ fn axis_view(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     if orbiting || hover.is_some_and(|p| axis_rect(app, rect).contains(p)) {
         painter.circle_filled(c, 55.0, t.overlay);
     }
-    for (i, (name, d, at, depth)) in tips.iter().enumerate() {
-        let col = if d.x != 0.0 {
+    for (i, (name, d, at, depth, radius)) in tips.iter().enumerate() {
+        let col = if d.x.abs() >= d.y.abs() && d.x.abs() >= d.z.abs() {
             t.axis_x
-        } else if d.y != 0.0 {
+        } else if d.y.abs() >= d.z.abs() {
             t.axis_y
         } else {
             t.axis_z
         };
-        let positive = !name.starts_with('-');
+        let face = !name.is_empty();
+        let positive = face && !name.starts_with('-');
         let ink = if *depth < -0.01 { col.gamma_multiply(0.55) } else { col };
-        painter.line_segment([c, *at], Stroke::new(if positive { 2.0 } else { 1.0 }, ink));
-        painter.circle_filled(*at, AXIS_RADIUS, if hovered == Some(i) { t.accent_soft } else { t.overlay });
-        painter.circle_stroke(
-            *at,
-            AXIS_RADIUS,
-            Stroke::new(if hovered == Some(i) { 2.0 } else { 1.0 }, if hovered == Some(i) { t.accent } else { ink }),
-        );
-        painter.text(*at, Align2::CENTER_CENTER, name.to_uppercase(), FontId::proportional(11.0), ink);
-        crate::scenario::publish_handle(&format!("axis_view:{name}"), *at);
+        if face {
+            painter.line_segment([c, *at], Stroke::new(if positive { 2.0 } else { 1.0 }, ink));
+        }
+        painter.circle_filled(*at, *radius, if hovered == Some(i) { t.accent_soft } else { t.overlay });
+        painter.circle_stroke(*at, *radius, Stroke::new(if hovered == Some(i) { 2.0 } else { 1.0 }, if hovered == Some(i) { t.accent } else { ink }));
+        if face {
+            painter.text(*at, Align2::CENTER_CENTER, name.to_uppercase(), FontId::proportional(11.0), ink);
+            crate::scenario::publish_handle(&format!("axis_view:{name}"), *at);
+        }
     }
     crate::scenario::publish_count("axis_view_highlights", f64::from(u8::from(hovered.is_some())));
     if let Some(i) = hovered
-        && let Some((name, d, _, _)) = tips.get(i)
+        && let Some((name, d, _, _, _)) = tips.get(i)
     {
-        crate::scenario::publish_handle(&format!("axis_view_hover:{name}"), hover.unwrap_or(c));
-        ui.interact(Rect::from_center_size(hover.unwrap_or(c), vec2(2.0, 2.0)), ui.id().with("axis_view_tip"), Sense::hover())
-            .on_hover_text(format!("View from {}. Click again to reverse. Drag to orbit; hold Shift to snap.", name.to_uppercase()));
+        let tip = if name.is_empty() {
+            "Diagonal view. Click again to reverse. Drag to orbit; hold Shift to snap.".to_string()
+        } else {
+            format!("View from {}. Click again to reverse. Drag to orbit; hold Shift to snap.", name.to_uppercase())
+        };
+        crate::scenario::publish_handle(&format!("axis_view_hover:{}", if name.is_empty() { "diag" } else { name }), hover.unwrap_or(c));
+        ui.interact(Rect::from_center_size(hover.unwrap_or(c), vec2(2.0, 2.0)), ui.id().with("axis_view_tip"), Sense::hover()).on_hover_text(tip);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         if ui.input(|i| i.pointer.primary_clicked())
             && let Some(dir) = axis_tip_direction(*d, app.cam.back().dot(*d) > 0.9999)
@@ -3229,7 +3259,8 @@ fn view_menu(app: &mut SolveApp, ui: &mut egui::Ui, button: Rect) -> bool {
             ui.checkbox(&mut app.ui.show_grid, grid);
             ui.checkbox(&mut app.ui.ground_shadow, ground);
             let mut component_colours = app.session.component_colors;
-            if ui.checkbox(&mut component_colours, "Component colours").changed() {
+            let colours_label = app.tr("view.component_colors").to_string();
+            if ui.checkbox(&mut component_colours, colours_label).changed() {
                 let _ = app.run("view.component_colors", json!({"enabled": component_colours}));
             }
             ui.separator();
@@ -3253,6 +3284,26 @@ fn view_menu(app: &mut SolveApp, ui: &mut egui::Ui, button: Rect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feature: fusion360-feature-parity, Property 27 (UI): component tints are deterministic Tokens picks
+    #[test]
+    fn property_27_component_tint_is_deterministic_and_theme_backed() {
+        let light = Tokens::light();
+        let dark = Tokens::dark();
+        let mut cases = 0usize;
+        for n in 0..120u64 {
+            let a = component_tint(&light, n);
+            let b = component_tint(&light, n);
+            assert_eq!(a, b, "tint must be stable for component {n}");
+            assert_ne!(a, Color32::TRANSPARENT);
+            let cycled = component_tint(&light, n + 8);
+            assert_eq!(a, cycled, "palette length 8 wraps");
+            let dark_tint = component_tint(&dark, n);
+            assert_ne!(dark_tint, Color32::TRANSPARENT);
+            cases += 1;
+        }
+        assert!(cases >= 100);
+    }
 
     #[test]
     fn cpu_viewport_uses_section_preview_and_sketch_slice() {

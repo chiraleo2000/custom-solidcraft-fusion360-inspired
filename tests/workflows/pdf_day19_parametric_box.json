@@ -1,0 +1,50 @@
+{
+  "id": "pdf_day19_parametric_box",
+  "day": 19,
+  "title": "Parametric box",
+  "description": "Named user parameters with expressions drive a box; edit rebuilds.",
+  "smoke": true,
+  "commands": [
+    {
+      "command": "parameters.add",
+      "params": {
+        "name": "length",
+        "expression": "40 mm"
+      }
+    },
+    {
+      "command": "parameters.add",
+      "params": {
+        "name": "width",
+        "expression": "length / 2"
+      }
+    },
+    {
+      "command": "parameters.add",
+      "params": {
+        "name": "height",
+        "expression": "10 mm"
+      }
+    },
+    {
+      "command": "solid.box",
+      "params": {
+        "length": "length",
+        "width": "width",
+        "height": "height",
+        "body_name": "Box"
+      }
+    },
+    {
+      "command": "parameters.change",
+      "params": {
+        "name": "length",
+        "expression": "60 mm"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "id": "pdf_day06_hex_nut",
+  "day": 6,
+  "title": "Hex nut",
+  "description": "Inscribed polygon, extrude, hole, midplane mirror of the hole feature.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "sketch.create",
+      "params": { "plane": "XY", "name": "Hex" }
+    },
+    {
+      "command": "sketch.polygon.inscribed",
+      "params": { "center": [0, 0], "radius": 12, "sides": 6 }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.extrude",
+      "params": { "sketch": "Hex", "distance": 8, "body_name": "Nut" }
+    },
+    {
+      "command": "solid.hole",
+      "params": {
+        "position": [0, 0, 8],
+        "diameter": 6,
+        "depth": 8,
+        "name": "Hole"
+      }
+    },
+    {
+      "command": "construct.plane.offset",
+      "params": { "base": "XY", "offset": 4, "name": "Mid" }
+    },
+    {
+      "command": "solid.mirror",
+      "params": {
+        "features": ["Hole"],
+        "plane": "Mid",
+        "name": "Twin"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

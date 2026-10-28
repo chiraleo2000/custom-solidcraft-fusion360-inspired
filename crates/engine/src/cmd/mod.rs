@@ -252,6 +252,14 @@ mod rest_tests;
 #[path = "workflow_recipes.rs"]
 mod workflow_recipes;
 
+#[cfg(test)]
+#[path = "y1_polish_tests.rs"]
+mod y1_polish_tests;
+
+#[cfg(test)]
+#[path = "pdf_workflow_recipes.rs"]
+mod pdf_workflow_recipes;
+
 pub fn find_command(id: &str) -> Option<&'static CommandSpec> {
     let all = command_specs();
     all.iter().find(|c| c.id == id).or_else(|| all.iter().find(|c| c.id.eq_ignore_ascii_case(id))).copied()

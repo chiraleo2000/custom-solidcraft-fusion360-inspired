@@ -1,0 +1,161 @@
+{
+  "id": "pdf_day04_complex_bottle",
+  "day": 4,
+  "title": "Complex bottle",
+  "description": "Offset plane, loft between sections, guide rail, mirror, fillet.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Bottom"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          -12,
+          -8
+        ],
+        "p1": [
+          12,
+          8
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "construct.plane.offset",
+      "params": {
+        "base": "XY",
+        "offset": 40,
+        "name": "TopPlane"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "TopPlane",
+        "name": "Top"
+      }
+    },
+    {
+      "command": "sketch.circle.center",
+      "params": {
+        "center": [
+          0,
+          0
+        ],
+        "radius": 6
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": {
+          "origin": [
+            0,
+            0,
+            0
+          ],
+          "x_dir": [
+            1,
+            0,
+            0
+          ],
+          "y_dir": [
+            0,
+            0,
+            1
+          ]
+        },
+        "name": "Guide"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            12,
+            0
+          ],
+          [
+            18,
+            20
+          ],
+          [
+            6,
+            40
+          ]
+        ],
+        "ids": [
+          "g0",
+          "g1"
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.loft",
+      "params": {
+        "sections": [
+          {
+            "sketch": "Bottom"
+          },
+          {
+            "sketch": "Top"
+          }
+        ],
+        "rails": {
+          "sketch": "Guide",
+          "curves": [
+            "g0",
+            "g1"
+          ]
+        },
+        "body_name": "Vessel"
+      }
+    },
+    {
+      "command": "solid.mirror",
+      "params": {
+        "bodies": [
+          "Vessel"
+        ],
+        "plane": "YZ",
+        "combine": true
+      }
+    },
+    {
+      "command": "solid.fillet",
+      "params": {
+        "edges": [
+          [
+            0,
+            8,
+            0
+          ]
+        ],
+        "radius": 1,
+        "body": "Vessel"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

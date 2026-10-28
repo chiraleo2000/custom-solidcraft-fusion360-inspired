@@ -1,0 +1,46 @@
+{
+  "id": "pdf_day18_mesh_convert",
+  "day": 18,
+  "title": "Mesh → BRep",
+  "smoke": true,
+  "description": "Export STL, insert mesh, face groups, section, deviation, convert faceted. STL stem names the mesh body.",
+  "commands": [
+    {
+      "command": "solid.box",
+      "params": { "length": 10, "width": 10, "height": 10, "body_name": "Box" }
+    },
+    {
+      "command": "file.save_mesh",
+      "params": { "path": "${tmp}/Scan.stl", "bodies": ["Box"] }
+    },
+    {
+      "command": "file.insert_mesh",
+      "params": { "path": "${tmp}/Scan.stl", "name": "Scan" }
+    },
+    {
+      "command": "mesh.face_groups",
+      "params": { "body": "Scan" }
+    },
+    {
+      "command": "mesh.section",
+      "params": {
+        "body": "Scan",
+        "origin": [0, 0, 5],
+        "normal": [0, 0, 1],
+        "name": "Section"
+      }
+    },
+    {
+      "command": "mesh.deviation",
+      "params": { "body": "Box", "mesh": "Scan" }
+    },
+    {
+      "command": "mesh.convert",
+      "params": { "body": "Scan", "mode": "faceted" }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-//! Static studies, generative candidates, and the cases that must refuse a result.
+﻿//! Static studies, generative candidates, and the cases that must refuse a result.
 
 use serde_json::{Value, json};
 
@@ -98,17 +98,20 @@ fn under_constrained_unsupported_and_non_box_studies_do_not_invent_stress() {
         "sim.study",
         json!({"name": "Axial", "body": "Beam", "constraints": [{"kind": "fixed", "target": "min_x"}], "loads": [{"magnitude": 10, "direction": [1, 0, 0]}]}),
     );
-    let err = s.execute("sim.solve", &json!({"name": "Axial"})).unwrap_err();
-    assert!(err.to_string().contains("not supported yet"), "{err}");
-    assert!(s.doc.studies.iter().find(|study| study.name == "Axial").unwrap().stress_max.is_none());
+    let axial = run(&mut s, "sim.solve", json!({"name": "Axial"}));
+    assert_eq!(axial["method"], "solidcraft-hex-grid");
+    assert!(axial["stress_max"].as_f64().unwrap() > 0.0, "{axial}");
+    assert_eq!(s.doc.features.len(), 1);
     run(&mut s, "sim.thermal", json!({"body": "Beam", "name": "Heat"}));
     let err = s.execute("sim.solve", &json!({"name": "Heat"})).unwrap_err();
     assert!(err.to_string().contains("not supported yet"), "{err}");
     run(&mut s, "solid.sphere", json!({"radius": 8, "body_name": "Ball"}));
-    let before = s.doc.to_json();
-    let err = s.execute("sim.static", &json!({"body": "Ball", "force": 10})).unwrap_err();
-    assert!(err.to_string().contains("not supported yet"), "{err}");
-    assert_eq!(s.doc.to_json(), before);
+    let before_features = s.doc.features.clone();
+    let ball = run(&mut s, "sim.static", json!({"body": "Ball", "force": 10, "elements": 3}));
+    assert_eq!(ball["method"], "solidcraft-hex-grid");
+    assert!(ball["displacement_max"].as_f64().unwrap() > 0.0, "{ball}");
+    assert!(ball["stress_max"].as_f64().unwrap() > 0.0, "{ball}");
+    assert_eq!(s.doc.features, before_features);
 }
 
 #[test]
@@ -144,15 +147,19 @@ fn hostile_sim_and_generative_inputs_leave_the_design_unchanged() {
     assert!(s.execute("generative.study", &json!({"preserve": names})).is_err());
     assert_eq!(s.doc.to_json(), before);
     let generated = run(&mut s, "generative.solve", json!({"name": "G"}));
-    assert_eq!(generated["method"], "solidcraft-section-reduction");
+    assert_eq!(generated["method"], "solidcraft-structured-lattice");
+    assert!(generated["cells"].as_u64().unwrap() >= 1, "{generated}");
+    assert!(!s.doc.generative[0].cells.is_empty());
     assert_eq!(s.doc.features.len(), feature_count);
     assert!(s.model.state().body("Candidate").is_none());
-    run(&mut s, "generative.promote", json!({"name": "G"}));
+    let promoted = run(&mut s, "generative.promote", json!({"name": "G"}));
+    assert_eq!(promoted["method"], "solidcraft-structured-lattice");
     assert!(s.model.state().body("Candidate").is_some());
-    assert!(s.doc.features.len() == feature_count + 1);
+    assert!(s.doc.features.len() > feature_count);
+    let after_promote = s.doc.features.len();
     let again = run(&mut s, "generative.promote", json!({"name": "G"}));
     assert_eq!(again["body"], "Candidate");
-    assert_eq!(s.doc.features.len(), feature_count + 1);
+    assert_eq!(s.doc.features.len(), after_promote);
 }
 
 #[test]
@@ -166,10 +173,11 @@ fn an_obstacle_is_kept_out_of_the_candidate_and_old_studies_still_load() {
         "generative.study",
         json!({"name": "G", "preserve": ["Keep"], "obstacle": ["Block"], "objective": "stiffness", "loads": [{"kind": "force", "magnitude": 30, "target": "max_x"}]}),
     );
-    let generated = run(&mut s, "generative.solve", json!({"name": "G"}));
-    assert_eq!(generated["method"], "solidcraft-section-reduction");
+    let generated = run(&mut s, "generative.solve", json!({"name": "G", "elements": 3}));
+    assert_eq!(generated["method"], "solidcraft-structured-lattice");
     let end = generated["origin"][0].as_f64().unwrap() + generated["length"].as_f64().unwrap();
     assert!(end <= 28.0 + 1e-6, "{generated}");
+    assert!(generated["cells"].as_u64().unwrap() >= 1, "{generated}");
     assert_eq!(s.doc.features, features);
     assert_eq!(s.doc.generative[0].loads.len(), 1);
     run(&mut s, "generative.study", json!({"name": "G", "objective": "mass"}));
@@ -189,6 +197,7 @@ fn an_obstacle_is_kept_out_of_the_candidate_and_old_studies_still_load() {
     let old_gen = r#"{"name":"G","preserve":["Keep"],"obstacle":[],"objective":"mass","method":"","candidate":null}"#;
     let generative: solidcraft_doc::GenerativeStudy = serde_json::from_str(old_gen).unwrap();
     assert!(generative.loads.is_empty());
+    assert!(generative.cells.is_empty());
     assert_eq!(generative.length, 0.0);
     assert!(!generative.stale);
 }

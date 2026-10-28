@@ -28,6 +28,11 @@ pub fn studio(name: &str) -> Option<StudioLight> {
     STUDIOS.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(key)).map(|(_, color, intensity)| StudioLight { color: *color, intensity: *intensity })
 }
 
+/// Names of the procedural studio lights SolidCraft ships (no image files).
+pub fn studio_names() -> &'static [&'static str] {
+    &["studio", "neutral", "white", "warm", "cool"]
+}
+
 /// Shade one fragment. `metalness` is 0 dielectric .. 1 metal. `roughness` is 0 smooth .. 1 rough.
 /// `tint` and `intensity` scale the studio key. Non-finite inputs become a dark fragment.
 pub(crate) fn shade_pbr(normal: Vec3, view_dir: Vec3, base: [f64; 3], metalness: f64, roughness: f64, tint: [f64; 3], intensity: f64) -> [f64; 3] {
@@ -73,6 +78,10 @@ mod tests {
         assert!(studio("studio").is_some_and(|s| s.intensity == 1.0));
         let warm = studio("Warm").expect("warm");
         assert!(warm.color[0] > warm.color[2]);
+        assert_eq!(studio_names().len(), 5);
+        for name in studio_names() {
+            assert!(studio(name).is_some(), "{name}");
+        }
     }
 
     /// Feature: fusion360-feature-parity, Property 24: Metalness and roughness change shaded pixels

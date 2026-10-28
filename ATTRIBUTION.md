@@ -11,7 +11,10 @@ third-party material under an open licence. Screenshots of Autodesk software are
 Generated-in-code assets are original and have no file to list:
 - the UI icon set (`crates/ui-egui/src/icons.rs`);
 - the axis view, navigation bar and timeline glyphs (`crates/ui-egui/src/viewport.rs`,
-  `crates/ui-egui/src/timeline.rs`).
+  `crates/ui-egui/src/timeline.rs`);
+- procedural studio lights `studio` / `neutral` / `white` / `warm` / `cool`
+  (`crates/render/src/pbr.rs`) — no HDRI or environment image files;
+- appearance library metalness/roughness presets (`crates/doc/src/appearance.rs`).
 
 ## Files
 

@@ -1,0 +1,88 @@
+{
+  "id": "pdf_day12_auger",
+  "day": 12,
+  "title": "Auger / screwdriver",
+  "description": "Coil auger plus a multi-section loft shank.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "solid.coil",
+      "params": {
+        "diameter": 16,
+        "revolutions": 4,
+        "pitch": 6,
+        "section_size": 2,
+        "name": "Flight"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Shank"
+      }
+    },
+    {
+      "command": "sketch.circle.center",
+      "params": {
+        "center": [
+          40,
+          0
+        ],
+        "radius": 4
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "construct.plane.offset",
+      "params": {
+        "base": "XY",
+        "offset": 30,
+        "name": "TipPlane"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "TipPlane",
+        "name": "Tip"
+      }
+    },
+    {
+      "command": "sketch.circle.center",
+      "params": {
+        "center": [
+          40,
+          0
+        ],
+        "radius": 2
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.loft",
+      "params": {
+        "sections": [
+          {
+            "sketch": "Shank"
+          },
+          {
+            "sketch": "Tip"
+          }
+        ],
+        "body_name": "Shank",
+        "operation": "new"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

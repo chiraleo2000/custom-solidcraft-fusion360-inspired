@@ -14,23 +14,24 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                 let regions = solidcraft_sketch::merge_regions(&select_profiles(ss, profiles)?);
                 if !guide.is_empty() {
                     let Some(region) = regions.first() else { return Err(DocError::Invalid("the patch boundary does not close".into())) };
-                    let mut boundary: Vec<Vec3> = region.outer.polyline(0.05).into_iter().map(|q| ss.plane.to_world(q)).collect();
-                    if let Some(first) = boundary.first().copied()
-                        && boundary.last().is_none_or(|last| last.dist(first) > 1e-4)
-                    {
-                        boundary.push(first);
-                    }
+                    let boundary = region_boundary(ss, region);
                     if !edges.is_empty() && edges.iter().any(|p| !near_loop(&boundary, *p, 1.0)) {
                         return Err(DocError::Invalid("the boundary does not close".into()));
                     }
                     made.push(kernel::patch_guided(&boundary, Some(guide.as_slice()))?);
+                } else if !edges.is_empty() {
+                    // Mixed sketch outer + edge picks: one face (confirm-on-loop, or a hole).
+                    if regions.len() != 1 {
+                        return Err(DocError::Invalid("not supported yet: mixed edge and sketch patch of several regions".into()));
+                    }
+                    let Some(region) = regions.first() else { return Err(DocError::Invalid("the patch boundary does not close".into())) };
+                    made.push(kernel::patch_mixed(&region_boundary(ss, region), edges, None)?);
                 } else {
                     for r in &regions {
                         made.push(kernel::patch_region(&ss.plane, r)?);
                     }
                 }
-            }
-            if !edges.is_empty() && guide.is_empty() {
+            } else if !edges.is_empty() {
                 let i = body_at(st, body, edges)?;
                 let b = st.bodies.get(i).ok_or_else(|| DocError::Invalid("body".into()))?;
                 made.push(kernel::patch_edges(&b.body, edges)?);
@@ -51,11 +52,14 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
                 .map(|n| st.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`"))))
                 .collect::<Result<_>>()?;
             let Some(&first) = idx.first() else { return Err(DocError::Invalid("pick the surfaces to stitch".into())) };
-            let refs: Vec<&kernel::Body> = idx.iter().filter_map(|i| st.bodies.get(*i).map(|b| &b.body)).collect();
-            let sewn = kernel::stitch(&refs, tol)?;
+            let parts: Vec<kernel::Body> = idx.iter().filter_map(|i| st.bodies.get(*i).map(|b| b.body.clone())).collect();
+            if parts.len() != idx.len() {
+                return Err(DocError::Invalid("body".into()));
+            }
+            let sewn = kernel::stitch_tolerant(&parts, tol)?;
             let Some(mb) = st.bodies.get(first).cloned() else { return Err(DocError::Invalid("body".into())) };
             if let Some(slot) = st.bodies.get_mut(first) {
-                *slot = ModelBody::new(mb.name, sewn, mb.feature);
+                *slot = ModelBody::new(mb.name, sewn.body, mb.feature);
             }
             // The others are now part of the first.
             let gone: Vec<String> = idx.iter().skip(1).filter_map(|i| st.bodies.get(*i).map(|b| b.name.clone())).collect();
@@ -64,11 +68,9 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
         }
         FeatureKind::Thicken { bodies, thickness, symmetric, operation, targets } => {
             let t = val(vals, thickness, Kind::Length)?;
-            let mut tools = Vec::new();
-            for n in bodies {
-                let b = st.body(n).ok_or_else(|| DocError::Unknown(format!("body `{n}`")))?;
-                tools.push(kernel::thicken(&b.body, t, *symmetric)?);
-            }
+            let refs: Vec<&kernel::Body> =
+                bodies.iter().map(|n| st.body(n).map(|b| &b.body).ok_or_else(|| DocError::Unknown(format!("body `{n}`")))).collect::<Result<_>>()?;
+            let tools = kernel::thicken_bodies(&refs, t, *symmetric)?;
             if tools.is_empty() {
                 return Err(DocError::Invalid("pick the surfaces to thicken".into()));
             }
@@ -129,6 +131,16 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
         }
         _ => Err(DocError::Invalid("not a surface feature".into())),
     }
+}
+
+fn region_boundary(ss: &SolvedSketch, region: &Region2) -> Vec<Vec3> {
+    let mut boundary: Vec<Vec3> = region.outer.polyline(0.05).into_iter().map(|q| ss.plane.to_world(q)).collect();
+    if let Some(first) = boundary.first().copied()
+        && boundary.last().is_none_or(|last| last.dist(first) > 1e-4)
+    {
+        boundary.push(first);
+    }
+    boundary
 }
 
 fn near_loop(loop_pts: &[Vec3], p: Vec3, tol: f64) -> bool {

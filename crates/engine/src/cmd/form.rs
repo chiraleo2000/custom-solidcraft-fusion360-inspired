@@ -6,13 +6,13 @@ use crate::params::{bad, expr, req_expr, str_, vec3};
 use crate::{Result, Session};
 use serde_json::{Value, json};
 use solidcraft_doc::expr::Kind;
-use solidcraft_doc::{FeatureKind, FormEdit, FormPull};
+use solidcraft_doc::{CageEdgeRef, CageVertRef, FeatureKind, FormEdit, FormPull, MAX_FORM_EDITS};
 use solidcraft_geom::Vec3;
 use solidcraft_kernel::{PointXform, bridge_deltas, point_edit_delta};
 
 const MAX_CAGE_VERTS: usize = 20_000;
 const MAX_SUBDIV_LEVEL: u32 = 6;
-const MAX_EDITS: usize = 10_000;
+const MAX_EDITS: usize = MAX_FORM_EDITS;
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("form.create", "Create Form", create).at("FORM", "CREATE").icon("box").params(
@@ -169,13 +169,9 @@ fn preview(s: &Session, id: u64, cmd: &str) -> Result<CagePreview> {
         }
         for edit in edits {
             match edit {
-                FormEdit::MovePoint { index, delta } | FormEdit::ExtrudeFace { index, delta } => acc.push((*index, *delta)),
-                FormEdit::InsertPoint { index } => acc.push((*index, Vec3::new(0.0, 0.0, 0.25))),
-                FormEdit::Bridge { a, b } => {
-                    acc.push((*a, Vec3::new(0.15, 0.0, 0.15)));
-                    acc.push((*b, Vec3::new(-0.15, 0.0, 0.15)));
-                }
-                FormEdit::Weld { index } => acc.push((*index, Vec3::new(0.0, 0.0, -0.05))),
+                FormEdit::MovePoint { index, delta } | FormEdit::ExtrudeFace { index, delta } => acc.push((index.0, *delta)),
+                // Insert/weld stay unsupported; bridge is recorded as MovePoint deltas by the command.
+                FormEdit::InsertPoint { .. } | FormEdit::Weld { .. } | FormEdit::Bridge { .. } => {}
                 FormEdit::InsertEdge { .. } | FormEdit::Subdivide { .. } | FormEdit::Crease { .. } => {}
             }
         }
@@ -240,14 +236,14 @@ fn edit_point(s: &mut Session, p: &Value) -> Result<Value> {
     if !delta.is_finite() {
         return Err(bad(cmd, "the edit must be finite"));
     }
-    push_edit(s, cmd, id, FormEdit::MovePoint { index, delta })
+    push_edit(s, cmd, id, FormEdit::MovePoint { index: CageVertRef(index), delta })
 }
 
 fn insert_edge(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "form.insert_edge";
     let index = p.get("index").and_then(Value::as_u64).filter(|i| *i < 24).ok_or_else(|| bad(cmd, "`index` is an edge 0…23"))? as u32;
     let id = latest_form(s, p, cmd)?;
-    push_edit(s, cmd, id, FormEdit::InsertEdge { index })
+    push_edit(s, cmd, id, FormEdit::InsertEdge { index: CageEdgeRef(index) })
 }
 
 fn insert_point(s: &mut Session, p: &Value) -> Result<Value> {
@@ -298,7 +294,7 @@ fn bridge(s: &mut Session, p: &Value) -> Result<Value> {
     let id = latest_form(s, p, cmd)?;
     let cage = preview(s, id, cmd)?;
     let (da, db) = bridge_deltas(&cage.shape, cage.length, cage.width, &cage.pulls, a, b).map_err(|e| model_err(cmd, e.to_string()))?;
-    push_edits(s, cmd, id, vec![FormEdit::MovePoint { index: a, delta: da }, FormEdit::MovePoint { index: b, delta: db }])
+    push_edits(s, cmd, id, vec![FormEdit::MovePoint { index: CageVertRef(a), delta: da }, FormEdit::MovePoint { index: CageVertRef(b), delta: db }])
 }
 
 fn weld(s: &mut Session, p: &Value) -> Result<Value> {
@@ -312,7 +308,27 @@ fn crease(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "form.crease";
     let index = p.get("index").and_then(Value::as_u64).filter(|i| *i < 24).ok_or_else(|| bad(cmd, "`index` is an edge 0…23"))? as u32;
     let id = latest_form(s, p, cmd)?;
-    push_edit(s, cmd, id, FormEdit::Crease { index })
+    if let Some(f) = s.doc_mut().feature_mut(id)
+        && let FeatureKind::Form { creases, edits, .. } = &mut f.kind
+    {
+        if edits.len().saturating_add(1) > MAX_EDITS || creases.len().saturating_add(1) > MAX_CAGE_VERTS {
+            return Err(bad(cmd, "a form keeps at most 10000 edits"));
+        }
+        let edge = CageEdgeRef(index);
+        if !creases.iter().any(|c| c.0 == index) {
+            creases.push(edge);
+        }
+        if !edits.iter().any(|e| matches!(e, FormEdit::Crease { index: i } if i.0 == index)) {
+            edits.push(FormEdit::Crease { index: edge });
+        }
+    } else {
+        return Err(bad(cmd, "no form feature"));
+    }
+    s.refresh();
+    if let Some(e) = s.model.result(id).and_then(|r| r.error.clone()) {
+        return Err(model_err(cmd, e));
+    }
+    Ok(json!({"feature": id}))
 }
 
 fn uncrease(s: &mut Session, p: &Value) -> Result<Value> {
@@ -322,8 +338,8 @@ fn uncrease(s: &mut Session, p: &Value) -> Result<Value> {
     let doc = s.doc_mut();
     let Some(f) = doc.feature_mut(id) else { return Err(bad(cmd, "no form feature")) };
     if let FeatureKind::Form { edits, creases, .. } = &mut f.kind {
-        edits.retain(|e| !matches!(e, FormEdit::Crease { index: i } if *i == index));
-        creases.retain(|i| *i != index);
+        edits.retain(|e| !matches!(e, FormEdit::Crease { index: i } if i.0 == index));
+        creases.retain(|i| i.0 != index);
     }
     s.refresh();
     Ok(json!({"feature": id}))
@@ -353,7 +369,7 @@ fn extrude_face(s: &mut Session, p: &Value) -> Result<Value> {
     let index = p.get("index").and_then(Value::as_u64).filter(|i| *i <= 15).ok_or_else(|| bad(cmd, "`index` is 0…15"))? as u32;
     let delta = p.get("delta").and_then(vec3).filter(|d| d.is_finite()).ok_or_else(|| bad(cmd, "`delta` must be [x,y,z]"))?;
     let id = latest_form(s, p, cmd)?;
-    push_edit(s, cmd, id, FormEdit::ExtrudeFace { index, delta })
+    push_edit(s, cmd, id, FormEdit::ExtrudeFace { index: CageVertRef(index), delta })
 }
 
 fn finish(s: &mut Session, p: &Value) -> Result<Value> {
@@ -412,7 +428,7 @@ fn match_edge(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let id = latest_form(s, p, cmd)?;
     if targets == 1 {
-        return push_edit(s, cmd, id, FormEdit::InsertEdge { index: edge });
+        return push_edit(s, cmd, id, FormEdit::InsertEdge { index: CageEdgeRef(edge) });
     }
     let mut pieces = 1u32;
     let mut want = 0u32;
@@ -444,7 +460,7 @@ mod tests {
 
     use super::{MAX_CAGE_VERTS, MAX_EDITS, MAX_SUBDIV_LEVEL};
     use crate::Session;
-    use solidcraft_doc::{FeatureKind, FormEdit};
+    use solidcraft_doc::{CageEdgeRef, CageVertRef, FeatureKind, FormEdit};
 
     fn run(s: &mut Session, id: &str, p: Value) -> Value {
         s.execute(id, &p).unwrap_or_else(|e| panic!("{id} {p}: {e}"))
@@ -490,7 +506,7 @@ mod tests {
         run(&mut s, "form.edit_point", json!({"feature": "Cage", "index": 0, "rotate": std::f64::consts::FRAC_PI_2}));
         let FeatureKind::Form { edits, .. } = &s.doc.features.iter().find(|f| f.name == "Cage").unwrap().kind else { panic!("form") };
         let delta = edits.iter().rev().find_map(|e| match e {
-            FormEdit::MovePoint { index: 0, delta } => Some(*delta),
+            FormEdit::MovePoint { index, delta } if index.0 == 0 => Some(*delta),
             _ => None,
         });
         let delta = delta.unwrap();
@@ -591,13 +607,55 @@ mod tests {
             let doc = s.doc_mut();
             let feature = doc.feature_mut(id).unwrap();
             if let FeatureKind::Form { edits, .. } = &mut feature.kind {
-                edits.resize(MAX_EDITS, FormEdit::Crease { index: 0 });
+                edits.resize(MAX_EDITS, FormEdit::Crease { index: CageEdgeRef(0) });
             }
         }
         let stuffed = s.doc.to_json();
         let over = s.execute("form.crease", &json!({"feature": "Panel", "index": 2})).unwrap_err();
         assert!(over.to_string().contains("10000"), "{over}");
         assert_eq!(s.doc.to_json(), stuffed);
+    }
+
+    #[test]
+    fn insert_point_and_weld_stay_unsupported_and_feature_creases_are_edges() {
+        let mut s = Session::default();
+        run(&mut s, "form.create", json!({"shape": "box", "length": 24, "width": 16, "thickness": 0, "name": "Cage"}));
+        let before = s.doc.to_json();
+        let insert = s.execute("form.insert_point", &json!({"feature": "Cage", "index": 5})).unwrap_err();
+        assert!(insert.to_string().contains("not supported yet"), "{insert}");
+        assert_eq!(s.doc.to_json(), before);
+        let weld = s.execute("form.weld", &json!({"feature": "Cage", "index": 5})).unwrap_err();
+        assert!(weld.to_string().contains("not supported yet"), "{weld}");
+        assert_eq!(s.doc.to_json(), before);
+
+        run(&mut s, "form.crease", json!({"feature": "Cage", "index": 4}));
+        let FeatureKind::Form { creases, edits, .. } = &s.doc.features.iter().find(|f| f.name == "Cage").unwrap().kind else {
+            panic!("form");
+        };
+        assert_eq!(creases, &vec![CageEdgeRef(4)]);
+        assert!(edits.iter().any(|e| matches!(e, FormEdit::Crease { index } if index.0 == 4)));
+        let with_crease = area(&s);
+        run(&mut s, "form.uncrease", json!({"feature": "Cage", "index": 4}));
+        let FeatureKind::Form { creases, .. } = &s.doc.features.iter().find(|f| f.name == "Cage").unwrap().kind else {
+            panic!("form");
+        };
+        assert!(creases.is_empty());
+        let _ = with_crease;
+
+        // A design that still carries InsertPoint / Weld edits fails honestly on refresh.
+        let mut hostile = Session::default();
+        run(&mut hostile, "form.create", json!({"shape": "box", "length": 20, "width": 12, "thickness": 0, "name": "Bad"}));
+        let id = hostile.doc.features.iter().find(|f| f.name == "Bad").unwrap().id;
+        {
+            let doc = hostile.doc_mut();
+            let feature = doc.feature_mut(id).unwrap();
+            if let FeatureKind::Form { edits, .. } = &mut feature.kind {
+                edits.push(FormEdit::InsertPoint { index: CageVertRef(5) });
+            }
+        }
+        hostile.refresh();
+        let err = hostile.model.result(id).and_then(|r| r.error.clone()).unwrap_or_default();
+        assert!(err.contains("not supported yet"), "{err}");
     }
 
     /// Feature: fusion360-feature-parity, Property 21: An old form with only pulls loads

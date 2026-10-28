@@ -7,13 +7,25 @@ const ASSET_EXT: &[&str] =
     &["png", "jpg", "jpeg", "svg", "ico", "icns", "ttf", "otf", "woff", "woff2", "gif", "bmp", "webp", "wav", "mp3", "stl", "step", "stp", "obj"];
 const SKIP_DIRS: &[&str] = &["target", ".git", "plan", "dist"];
 
+/// Local scratch dirs (private CARGO_TARGET_DIR / CARGO_HOME / rustup copies) must not
+/// be treated as repository assets. Exact names in SKIP_DIRS, plus common prefixes.
+fn skip_dir(name: &str) -> bool {
+    if name.starts_with('.') || SKIP_DIRS.contains(&name) {
+        return true;
+    }
+    name.starts_with("target")
+        || name.starts_with("cargo-home")
+        || name.starts_with("rustup-home")
+        || name.starts_with("rustup-")
+}
+
 fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().to_string();
         if p.is_dir() {
-            if !SKIP_DIRS.contains(&name.as_str()) && !name.starts_with('.') {
+            if !skip_dir(&name) {
                 walk(&p, root, out);
             }
         } else if let Some(ext) = p.extension().map(|x| x.to_string_lossy().to_ascii_lowercase())

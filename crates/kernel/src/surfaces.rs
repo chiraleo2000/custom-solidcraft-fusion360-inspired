@@ -745,7 +745,7 @@ pub fn open_sweep(stations: &[Vec<Vec3>], close_profile: bool, close_path: bool)
     if profile_steps == 0 || profile_steps.saturating_mul(path_steps) > 20_000 {
         return Err(KernelError::Invalid("the open surface has too many faces".into()));
     }
-    guard("open surface", || {
+    guard("surface.open_sweep", || {
         let mut faces = Vec::new();
         let emit = |ia: usize, ib: usize, faces: &mut Vec<mt::Face>| -> Result<()> {
             let (Some(sa), Some(sb)) = (stations.get(ia), stations.get(ib)) else {
@@ -1555,6 +1555,7 @@ mod tests {
         assert!(tube.is_surface(), "a closed profile extrude has no caps");
         assert_eq!(tube.face_count(), 4);
         let m = measure(&tube).unwrap();
+        assert!(m.volume.abs() < 1e-4, "open tube volume {}", m.volume);
         assert!((m.area - 36.0 * 6.0).abs() < 1e-2, "area {} faces {}", m.area, tube.face_count());
         assert!(open_sweep(&[square, raised], true, false).is_ok());
     }

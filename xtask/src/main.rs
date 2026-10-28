@@ -9,6 +9,7 @@ mod features;
 mod layers;
 mod licences;
 mod test;
+mod workflows;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -30,12 +31,15 @@ commands:
   licences [--check]
                   write THIRD-PARTY-LICENSES.txt (the licences of every shipped crate, embedded
                   in the programs); --check fails when it is out of date
+  workflows [--ci] [--run]
+                  Stage-1 PDF-day recipe gate under tests/workflows (structural check always;
+                  --ci selects the PR subset; --run executes the engine recipe test)
   test [CARGO ARGS] [-- TEST ARGS]
                   build the tests with the ci profile, then run every test binary at once
                   (and the doc tests alongside)
   wasm            cargo check every library crate and the web app for wasm32-unknown-unknown
-  ci              fmt --check, assets, licences --check, layers, clippy -D warnings, then the tests
-                  with the wasm check alongside (stops at the first failing step)
+  ci              fmt --check, assets, licences --check, layers, workflows --ci, clippy -D warnings,
+                  then the tests with the wasm check alongside (stops at the first failing step)
 ";
 
 fn main() -> ExitCode {
@@ -48,6 +52,7 @@ fn main() -> ExitCode {
         Some("oracle") => cmd_oracle(rest.iter().position(|a| *a == "--cli").and_then(|i| rest.get(i + 1)).copied()),
         Some("book") => book::run(&root(), !rest.contains(&"--no-build")),
         Some("licences") => licences::run(&root(), rest.contains(&"--check")),
+        Some("workflows") => workflows::run(&root(), rest.contains(&"--ci"), rest.contains(&"--run")),
         Some("test") => {
             let (cargo_args, test_args) = rest.iter().position(|a| *a == "--").map_or((&rest[..], &[][..]), |i| (&rest[..i], &rest[i + 1..]));
             test::run(cargo_args, test_args, vec![test::doc_tests(cargo_args, test_args)])
@@ -293,6 +298,7 @@ fn cmd_ci() -> Result<(), String> {
     assets::run(&root())?;
     licences::run(&root(), true)?;
     cmd_layers()?;
+    workflows::run(&root(), true, false)?;
     let mut c = cargo();
     c.args(["clippy", "--workspace", "--all-targets", "--profile", "ci", "--", "-D", "warnings"]);
     run(c, "cargo clippy -D warnings")?;

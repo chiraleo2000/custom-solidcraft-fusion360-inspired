@@ -1,6 +1,10 @@
 //! Tessellated 3D interchange writers from public specifications: Wavefront MTL, Khronos
 //! glTF/GLB, Stanford PLY, ASTM AMF, COLLADA, X3D, VRML 97, VRM (glTF-based), and OpenUSD
 //! ASCII (`.usda` / `.usd`). Proprietary vendor formats are refused in [`crate::Format::from_name`].
+//!
+//! Writers are pure Rust (string / XML / JSON / binary buffers only): no filesystem, threads, or
+//! native SDKs, so they stay `wasm32-unknown-unknown`-safe. OpenUSD here is ASCII USDA emitted in
+//! process — not a native USD binding.
 
 use solidcraft_geom::Mesh;
 
@@ -22,32 +26,66 @@ pub struct MeshExport {
 
 impl MeshExport {
     pub fn from_body(name: String, mesh: Mesh, color: Option<[f32; 3]>, opacity: f32) -> Result<Self> {
+        let n_pos = mesh.positions.len();
         for p in &mesh.positions {
             if !p.is_finite() {
                 return Err(IoError::Invalid("export mesh has non-finite positions".into()));
             }
         }
-        Ok(Self {
-            name,
-            mesh,
-            color: color.unwrap_or([0.75, 0.75, 0.75]),
-            opacity: opacity.clamp(0.0, 1.0),
-        })
+        for n in &mesh.normals {
+            if !n.is_finite() {
+                return Err(IoError::Invalid("export mesh has non-finite normals".into()));
+            }
+        }
+        for t in &mesh.triangles {
+            for &i in t {
+                if i as usize >= n_pos {
+                    return Err(IoError::Invalid("export mesh has out-of-range triangle indices".into()));
+                }
+            }
+        }
+        let color = color.unwrap_or([0.75, 0.75, 0.75]);
+        if !color.iter().all(|c| c.is_finite()) {
+            return Err(IoError::Invalid("export mesh has non-finite colour".into()));
+        }
+        if !opacity.is_finite() {
+            return Err(IoError::Invalid("export mesh has non-finite opacity".into()));
+        }
+        Ok(Self { name, mesh, color, opacity: opacity.clamp(0.0, 1.0) })
     }
 }
 
-/// Total triangle count across bodies; errors past [`MAX_EXPORT_TRIANGLES`].
-pub fn check_triangle_cap(bodies: &[MeshExport]) -> Result<()> {
-    let n: usize = bodies.iter().map(|b| b.mesh.triangles.len()).sum();
+/// Errors when `n` exceeds [`MAX_EXPORT_TRIANGLES`].
+pub fn check_triangle_count(n: usize) -> Result<()> {
     if n > MAX_EXPORT_TRIANGLES {
         return Err(IoError::Invalid(format!("export with {n} triangles (limit {MAX_EXPORT_TRIANGLES})")));
     }
     Ok(())
 }
 
+/// Total triangle count across bodies; errors past [`MAX_EXPORT_TRIANGLES`].
+pub fn check_triangle_cap(bodies: &[MeshExport]) -> Result<()> {
+    // Saturating sum: an absurd body list must not wrap past the cap check.
+    let mut total = 0usize;
+    for b in bodies {
+        total = total.saturating_add(b.mesh.triangles.len());
+        if total > MAX_EXPORT_TRIANGLES {
+            return check_triangle_count(total);
+        }
+    }
+    check_triangle_count(total)
+}
+
+/// USD / OBJ / MTL identifier: ASCII alnum / `_` / `-`, never empty, never digit-leading.
 fn safe_ident(name: &str) -> String {
     let s: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
-    if s.is_empty() { "Body".into() } else { s }
+    if s.is_empty() {
+        "Body".into()
+    } else if s.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+        format!("_{s}")
+    } else {
+        s
+    }
 }
 
 fn mtl_name(body: &str) -> String {
@@ -55,7 +93,8 @@ fn mtl_name(body: &str) -> String {
 }
 
 /// Wavefront MTL beside an OBJ (public Wavefront companion format).
-pub fn write_mtl(bodies: &[MeshExport]) -> String {
+pub fn write_mtl(bodies: &[MeshExport]) -> Result<String> {
+    check_triangle_cap(bodies)?;
     let mut s = String::from("# SolidCraft MTL export\n");
     for b in bodies {
         s += &format!("newmtl {}\n", mtl_name(&b.name));
@@ -63,13 +102,16 @@ pub fn write_mtl(bodies: &[MeshExport]) -> String {
         s += &format!("Kd {r} {g} {bl}\n");
         s += &format!("d {}\nillum 1\n\n", b.opacity);
     }
-    s
+    Ok(s)
 }
 
 /// Wavefront OBJ that references `mtl_file` via `mtllib` / `usemtl`.
-pub fn write_obj_with_mtl(bodies: &[MeshExport], mtl_file: &str) -> String {
+pub fn write_obj_with_mtl(bodies: &[MeshExport], mtl_file: &str) -> Result<String> {
+    check_triangle_cap(bodies)?;
     let mut s = String::from("# SolidCraft OBJ export (mm)\n");
     if !mtl_file.is_empty() {
+        // Path in mtllib is hostile: keep basename-like ASCII only.
+        let mtl_file: String = mtl_file.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' { c } else { '_' }).collect();
         s += &format!("mtllib {mtl_file}\n");
     }
     let mut base = 1usize;
@@ -91,13 +133,14 @@ pub fn write_obj_with_mtl(bodies: &[MeshExport], mtl_file: &str) -> String {
                 s += &format!("f {a} {c} {d}\n");
             }
         }
-        base += b.mesh.positions.len();
+        base = base.saturating_add(b.mesh.positions.len());
     }
-    s
+    Ok(s)
 }
 
 /// Stanford PLY (ASCII).
-pub fn write_ply(bodies: &[MeshExport]) -> String {
+pub fn write_ply(bodies: &[MeshExport]) -> Result<String> {
+    check_triangle_cap(bodies)?;
     let n_v: usize = bodies.iter().map(|b| b.mesh.positions.len()).sum();
     let n_f: usize = bodies.iter().map(|b| b.mesh.triangles.len()).sum();
     let mut s = format!(
@@ -114,13 +157,14 @@ pub fn write_ply(bodies: &[MeshExport]) -> String {
             let [a, c, d] = t.map(|i| i as usize + base);
             s += &format!("3 {a} {c} {d}\n");
         }
-        base += b.mesh.positions.len();
+        base = base.saturating_add(b.mesh.positions.len());
     }
-    s
+    Ok(s)
 }
 
 /// ASTM AMF (XML triangle mesh + colour).
-pub fn write_amf(bodies: &[MeshExport], name: &str) -> String {
+pub fn write_amf(bodies: &[MeshExport], name: &str) -> Result<String> {
+    check_triangle_cap(bodies)?;
     let mut s = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<amf unit=\"millimeter\" version=\"1.1\">\n  <metadata type=\"name\">{}</metadata>\n  <metadata type=\"producer\">SolidCraft</metadata>\n",
         xml_escape(name)
@@ -142,11 +186,12 @@ pub fn write_amf(bodies: &[MeshExport], name: &str) -> String {
         s += "      </volume>\n    </mesh>\n  </object>\n";
     }
     s += "</amf>\n";
-    s
+    Ok(s)
 }
 
 /// COLLADA 1.4.1 (triangle meshes).
-pub fn write_dae(bodies: &[MeshExport], name: &str) -> String {
+pub fn write_dae(bodies: &[MeshExport], name: &str) -> Result<String> {
+    check_triangle_cap(bodies)?;
     let mut s = String::from(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
@@ -198,17 +243,15 @@ pub fn write_dae(bodies: &[MeshExport], name: &str) -> String {
     s += &xml_escape(name);
     s += "\">\n";
     for (i, b) in bodies.iter().enumerate() {
-        s += &format!(
-            "      <node id=\"node{i}\" name=\"{}\"><instance_geometry url=\"#geom{i}\"/></node>\n",
-            xml_escape(&b.name)
-        );
+        s += &format!("      <node id=\"node{i}\" name=\"{}\"><instance_geometry url=\"#geom{i}\"/></node>\n", xml_escape(&b.name));
     }
     s += "    </visual_scene>\n  </library_visual_scenes>\n  <scene><instance_visual_scene url=\"#Scene\"/></scene>\n</COLLADA>\n";
-    s
+    Ok(s)
 }
 
 /// X3D XML encoding.
-pub fn write_x3d(bodies: &[MeshExport], name: &str) -> String {
+pub fn write_x3d(bodies: &[MeshExport], name: &str) -> Result<String> {
+    check_triangle_cap(bodies)?;
     let mut s = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<X3D profile=\"Interchange\" version=\"3.3\" xmlns:xsd=\"http://www.w3.org/2001/XMLSchema-instance\">\n  <head><meta name=\"title\" content=\"{}\"/><meta name=\"generator\" content=\"SolidCraft\"/></head>\n  <Scene>\n    <WorldInfo title=\"{}\"/>\n",
         xml_escape(name),
@@ -226,11 +269,12 @@ pub fn write_x3d(bodies: &[MeshExport], name: &str) -> String {
         );
     }
     s += "  </Scene>\n</X3D>\n";
-    s
+    Ok(s)
 }
 
 /// VRML 97 (VRML 2.0) text.
-pub fn write_vrml(bodies: &[MeshExport], name: &str) -> String {
+pub fn write_vrml(bodies: &[MeshExport], name: &str) -> Result<String> {
+    check_triangle_cap(bodies)?;
     let mut s = format!("#VRML V2.0 utf8\n# SolidCraft export (mm, Z-up)\nWorldInfo {{ title \"{}\" }}\n", vrml_escape(name));
     for b in bodies {
         let [r, g, bl] = b.color;
@@ -243,11 +287,13 @@ pub fn write_vrml(bodies: &[MeshExport], name: &str) -> String {
             idx.trim_end_matches(',')
         );
     }
-    s
+    Ok(s)
 }
 
 /// OpenUSD ASCII (`.usda`). `.usd` may carry the same ASCII payload.
-pub fn write_usda(bodies: &[MeshExport], name: &str) -> String {
+/// Pure Rust — wasm-safe (no native OpenUSD binding).
+pub fn write_usda(bodies: &[MeshExport], name: &str) -> Result<String> {
+    check_triangle_cap(bodies)?;
     let root = safe_ident(name);
     let mut s = format!(
         r#"#usda 1.0
@@ -284,11 +330,12 @@ def Xform "{root}" {{
         );
     }
     s += "}\n";
-    s
+    Ok(s)
 }
 
 /// glTF 2.0 JSON document (embedded buffer as a data URI) plus optional VRM extension.
 fn gltf_document(bodies: &[MeshExport], name: &str, vrm: bool) -> Result<(serde_json::Value, Vec<u8>)> {
+    check_triangle_cap(bodies)?;
     // Pack all meshes into one buffer: interleaved is unnecessary; concatenate positions then indices.
     let mut bin = Vec::new();
     let mut meshes_json = Vec::new();
@@ -428,15 +475,18 @@ pub fn write_glb(bodies: &[MeshExport], name: &str, vrm: bool) -> Result<Vec<u8>
     let mut bin_chunk = bin;
     bin_chunk.resize(bin_pad, 0);
 
-    let total = 12 + 8 + json_chunk.len() + 8 + bin_chunk.len();
-    let mut out = Vec::with_capacity(total);
+    let total = 12u64.saturating_add(8).saturating_add(json_chunk.len() as u64).saturating_add(8).saturating_add(bin_chunk.len() as u64);
+    let total_u32 = u32::try_from(total).map_err(|_| IoError::Invalid("glb export exceeds 4 GiB".into()))?;
+    let json_len = u32::try_from(json_chunk.len()).map_err(|_| IoError::Invalid("glb JSON chunk too large".into()))?;
+    let bin_len = u32::try_from(bin_chunk.len()).map_err(|_| IoError::Invalid("glb BIN chunk too large".into()))?;
+    let mut out = Vec::with_capacity(total as usize);
     out.extend_from_slice(&0x4654_6C67u32.to_le_bytes()); // glTF
     out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
+    out.extend_from_slice(&total_u32.to_le_bytes());
+    out.extend_from_slice(&json_len.to_le_bytes());
     out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // JSON
     out.extend_from_slice(&json_chunk);
-    out.extend_from_slice(&(bin_chunk.len() as u32).to_le_bytes());
+    out.extend_from_slice(&bin_len.to_le_bytes());
     out.extend_from_slice(&0x004E_4942u32.to_le_bytes()); // BIN\0
     out.extend_from_slice(&bin_chunk);
     Ok(out)
@@ -489,10 +539,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 /// Collect tessellated export meshes from selected model bodies.
-pub fn collect_meshes(
-    sel: &[&solidcraft_doc::ModelBody],
-    tessellate: impl Fn(&solidcraft_kernel::Body) -> Result<Mesh>,
-) -> Result<Vec<MeshExport>> {
+pub fn collect_meshes(sel: &[&solidcraft_doc::ModelBody], tessellate: impl Fn(&solidcraft_kernel::Body) -> Result<Mesh>) -> Result<Vec<MeshExport>> {
     let mut out = Vec::with_capacity(sel.len());
     for b in sel {
         let mesh = tessellate(&b.body)?;
@@ -521,11 +568,11 @@ mod tests {
     #[test]
     fn ply_and_obj_mtl_mention_geometry() {
         let b = [tri()];
-        let ply = write_ply(&b);
+        let ply = write_ply(&b).unwrap();
         assert!(ply.contains("element vertex 3") && ply.contains("element face 1"));
-        let mtl = write_mtl(&b);
+        let mtl = write_mtl(&b).unwrap();
         assert!(mtl.contains("newmtl mat_A") && mtl.contains("Kd 1"));
-        let obj = write_obj_with_mtl(&b, "part.mtl");
+        let obj = write_obj_with_mtl(&b, "part.mtl").unwrap();
         assert!(obj.contains("mtllib part.mtl") && obj.contains("usemtl mat_A") && obj.contains("f "));
     }
 
@@ -536,11 +583,52 @@ mod tests {
         assert_eq!(&glb[..4], b"glTF");
         let vrm = write_glb(&b, "t", true).unwrap();
         assert_eq!(&vrm[..4], b"glTF");
+        let gltf = String::from_utf8(write_gltf(&b, "t").unwrap()).unwrap();
+        assert!(gltf.contains("\"asset\"") && gltf.contains("data:application/octet-stream;base64,"));
     }
 
     #[test]
-    fn usda_is_ascii_usd() {
-        let u = write_usda(&[tri()], "Part");
+    fn usda_is_ascii_usd_and_sanitises_idents() {
+        let u = write_usda(&[tri()], "Part").unwrap();
         assert!(u.starts_with("#usda 1.0") && u.contains("upAxis = \"Z\"") && u.contains("def Mesh"));
+        let hostile = MeshExport::from_body("9 bad/name!".into(), tri().mesh, Some([0., 1., 0.]), 1.0).unwrap();
+        let u2 = write_usda(&[hostile], "1root").unwrap();
+        assert!(u2.contains("def Xform \"_1root\"") && u2.contains("def Mesh \"_9_bad_name_\""));
+    }
+
+    #[test]
+    fn triangle_cap_rejects_oversized_exports() {
+        assert!(check_triangle_count(0).is_ok());
+        assert!(check_triangle_count(MAX_EXPORT_TRIANGLES).is_ok());
+        assert!(check_triangle_cap(&[tri()]).is_ok());
+        let err = check_triangle_count(MAX_EXPORT_TRIANGLES + 1).unwrap_err().to_string();
+        assert!(err.contains("triangles") && err.contains(&MAX_EXPORT_TRIANGLES.to_string()), "{err}");
+        assert!(check_triangle_cap(&[]).is_ok(), "empty selection is capped elsewhere as Empty");
+    }
+
+    #[test]
+    fn hostile_mesh_fields_are_refused() {
+        let mesh = Mesh {
+            positions: vec![Vec3::new(0., 0., 0.), Vec3::new(1., 0., 0.), Vec3::new(0., 1., 0.)],
+            triangles: vec![[0, 1, 99]],
+            tri_face: vec![0],
+            ..Default::default()
+        };
+        assert!(MeshExport::from_body("A".into(), mesh, None, 1.0).is_err());
+        let mesh = Mesh {
+            positions: vec![Vec3::new(f64::NAN, 0., 0.), Vec3::new(1., 0., 0.), Vec3::new(0., 1., 0.)],
+            triangles: vec![[0, 1, 2]],
+            tri_face: vec![0],
+            ..Default::default()
+        };
+        assert!(MeshExport::from_body("A".into(), mesh, None, 1.0).is_err());
+        let mesh = Mesh {
+            positions: vec![Vec3::new(0., 0., 0.), Vec3::new(1., 0., 0.), Vec3::new(0., 1., 0.)],
+            triangles: vec![[0, 1, 2]],
+            tri_face: vec![0],
+            ..Default::default()
+        };
+        assert!(MeshExport::from_body("A".into(), mesh.clone(), Some([f32::NAN, 0., 0.]), 1.0).is_err());
+        assert!(MeshExport::from_body("A".into(), mesh, None, f32::INFINITY).is_err());
     }
 }

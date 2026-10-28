@@ -13,12 +13,16 @@ struct Step {
 
 const STEPS: &[Step] = &[
     Step { text_key: "coaching.step_workspace_tabs", anchor: Some("toolbar:tab.SOLID") },
+    Step { text_key: "coaching.step_toolbox", anchor: None },
     Step { text_key: "coaching.step_create_sketch", anchor: Some("toolbar:sketch.create") },
     Step { text_key: "coaching.step_draw_line", anchor: Some("toolbar:sketch.line") },
     Step { text_key: "coaching.step_close_profile", anchor: None },
     Step { text_key: "coaching.step_dimension", anchor: Some("toolbar:sketch.dimension") },
+    Step { text_key: "coaching.step_fully_defined", anchor: Some("sketch_palette:auto_constrain") },
     Step { text_key: "coaching.step_finish", anchor: Some("sketch_palette:finish") },
     Step { text_key: "coaching.step_extrude", anchor: Some("toolbar:solid.extrude") },
+    Step { text_key: "coaching.step_new_component", anchor: Some("toolbar:component.create") },
+    Step { text_key: "coaching.step_activate", anchor: None },
 ];
 
 /// What to draw this frame.
@@ -148,7 +152,11 @@ mod tests {
         assert!(coaching_view(&h.app).is_none());
         assert!(cases >= 100, "property ran {cases} times");
         assert!(STEPS.iter().any(|step| step.text_key == "coaching.step_workspace_tabs"));
+        assert!(STEPS.iter().any(|step| step.text_key == "coaching.step_toolbox"));
         assert!(STEPS.iter().any(|step| step.text_key == "coaching.step_extrude"));
+        assert!(STEPS.iter().any(|step| step.text_key == "coaching.step_fully_defined"));
+        assert!(STEPS.iter().any(|step| step.text_key == "coaching.step_new_component"));
+        assert!(STEPS.iter().any(|step| step.text_key == "coaching.step_activate"));
     }
 
     /// Feature: ux-ui-shell-improvements, Property 25: The new-document cue is shown exactly when the design has no features

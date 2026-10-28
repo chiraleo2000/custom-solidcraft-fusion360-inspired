@@ -1,8 +1,17 @@
 //! Local PBR images and storyboard playback. Real placements stay where they are.
 
 use serde_json::{Value, json};
+use solidcraft_doc::canvas::base64_encode;
 
 use crate::Session;
+
+fn tiny_png() -> String {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    bytes.extend(8u32.to_be_bytes());
+    bytes.extend(8u32.to_be_bytes());
+    bytes.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    base64_encode(&bytes)
+}
 
 fn run(s: &mut Session, id: &str, p: Value) -> Value {
     s.execute(id, &p).unwrap_or_else(|e| panic!("{id} {p}: {e}"))
@@ -255,4 +264,105 @@ fn a_bad_step_a_video_path_and_a_rotation_do_not_move_the_assembly() {
     assert_eq!(lone.doc.occurrences, alone);
     assert!(lone.doc.stories.is_empty());
     assert!(lone.doc.assembly.exploded.is_empty());
+}
+
+#[test]
+fn local_quality_and_scene_lighting_change_pixels_without_geometry() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 24, "width": 18, "height": 12, "body_name": "Part"}));
+    // A matte dielectric keeps studio tints out of the specular clamp, so warm ≠ cool in the PNG.
+    run(&mut s, "appearance.assign", json!({"bodies": ["Part"], "appearance": "ABS - Red"}));
+    let features = s.doc.features.clone();
+    let positions = s.model.state().bodies[0].mesh().positions.clone();
+    let dir = std::env::temp_dir();
+    let draft = dir.join(format!("solidcraft-q-draft-{}.png", std::process::id()));
+    let high = dir.join(format!("solidcraft-q-high-{}.png", std::process::id()));
+    let warm = dir.join(format!("solidcraft-q-warm-{}.png", std::process::id()));
+    let cool = dir.join(format!("solidcraft-q-cool-{}.png", std::process::id()));
+    let draft_shot = run(&mut s, "render.image", json!({"path": draft.to_string_lossy(), "quality": "draft"}));
+    assert_eq!(draft_shot["width"], 160, "{draft_shot}");
+    assert_eq!(draft_shot["height"], 120, "{draft_shot}");
+    let high_shot = run(&mut s, "render.image", json!({"path": high.to_string_lossy(), "quality": "high"}));
+    assert_eq!(high_shot["width"], 640, "{high_shot}");
+    assert_eq!(high_shot["height"], 480, "{high_shot}");
+    assert!(std::fs::read(&high).unwrap().len() > std::fs::read(&draft).unwrap().len());
+    let warm_env = run(&mut s, "render.environment", json!({"name": "warm"}));
+    assert_eq!(warm_env["fallback"], false, "{warm_env}");
+    assert!((warm_env["color"][0].as_f64().unwrap_or(0.0) - 1.0).abs() < 1e-9, "{warm_env}");
+    let warm_shot = run(&mut s, "render.image", json!({"path": warm.to_string_lossy(), "quality": "standard", "environment": "warm"}));
+    assert!((warm_shot["light"]["color"][0].as_f64().unwrap_or(0.0) - 1.0).abs() < 1e-9, "{warm_shot}");
+    let cool_env = run(&mut s, "render.environment", json!({"name": "cool"}));
+    assert_eq!(cool_env["fallback"], false, "{cool_env}");
+    assert!(cool_env["color"][2].as_f64().unwrap_or(0.0) > cool_env["color"][0].as_f64().unwrap_or(1.0), "{cool_env}");
+    let cool_shot = run(&mut s, "render.image", json!({"path": cool.to_string_lossy(), "quality": "standard", "environment": "cool"}));
+    assert!(cool_shot["light"]["color"][2].as_f64().unwrap_or(0.0) > cool_shot["light"]["color"][0].as_f64().unwrap_or(1.0), "{cool_shot}");
+    assert_ne!(warm_shot["light"]["color"], cool_shot["light"]["color"], "warm and cool lights must differ: {warm_shot} vs {cool_shot}");
+    assert_ne!(std::fs::read(&warm).unwrap(), std::fs::read(&cool).unwrap(), "warm and cool scenes must shade differently");
+    let oversized = s.execute("render.image", &json!({"path": "big.png", "width": 10_000})).unwrap_err();
+    assert!(oversized.to_string().contains("width"), "{oversized}");
+    assert_eq!(s.doc.features, features);
+    assert_eq!(s.model.state().bodies[0].mesh().positions, positions);
+    for path in [&draft, &high, &warm, &cool] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// PDF Day 28: appearance, scene lighting, decal path, local PBR image. Cloud stays refused.
+#[test]
+fn wf_day28_render() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 16, "body_name": "Housing"}));
+    run(&mut s, "appearance.assign", json!({"bodies": ["Housing"], "appearance": "ABS - Red"}));
+    let scene = run(&mut s, "render.environment", json!({"name": "warm", "intensity": 1.1}));
+    assert_eq!(scene["fallback"], false, "{scene}");
+    let decal = run(&mut s, "canvas.decal", json!({"data": tiny_png(), "face": [20, 15, 16], "width": 20, "name": "Badge"}));
+    assert!(decal["canvas"].as_u64().is_some(), "{decal}");
+    let features = s.doc.features.len();
+    let path = std::env::temp_dir().join(format!("solidcraft-day28-{}.png", std::process::id()));
+    let shot = run(&mut s, "render.image", json!({"path": path.to_string_lossy(), "quality": "standard"}));
+    assert_eq!(shot["width"], 320, "{shot}");
+    assert_eq!(shot["height"], 240, "{shot}");
+    assert_eq!(shot["decals"], 1, "{shot}");
+    assert_eq!(shot["varied"], true, "{shot}");
+    assert!((shot["light"]["color"][0].as_f64().unwrap_or(0.0) - 1.0).abs() < 1e-9, "{shot}");
+    assert!(std::fs::read(&path).unwrap().starts_with(b"\x89PNG"));
+    assert_eq!(s.doc.features.len(), features);
+    let cloud = s.execute("render.image", &json!({"cloud": true, "path": "cloud.png"})).unwrap_err();
+    assert!(cloud.to_string().contains("cloud"), "{cloud}");
+    assert_eq!(s.doc.features.len(), features);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// PDF Day 30: storyboard from explode, play, publish PNG sequence. Video stays refused.
+#[test]
+fn wf_day30_anim() {
+    let mut s = Session::default();
+    let (a, b) = two_boxes(&mut s);
+    let placements = s.doc.occurrences.clone();
+    run(&mut s, "explode.create", json!({"name": "Show", "scale": 1}));
+    let made = run(&mut s, "anim.storyboard", json!({"name": "Show"}));
+    assert_eq!(made["source"], "explode", "{made}");
+    assert!(made["keys"].as_u64().unwrap_or(0) >= 4, "{made}");
+    let mid = run(&mut s, "anim.play", json!({"story": "Show", "time": 0.5}));
+    assert!(mid["poses"].as_array().is_some_and(|p| p.len() >= 2), "{mid}");
+    assert_eq!(s.doc.occurrences, placements);
+    let dir = std::env::temp_dir();
+    let frame = dir.join(format!("solidcraft-day30-{}.png", std::process::id()));
+    let published = run(&mut s, "anim.publish", json!({"path": frame.to_string_lossy(), "frames": 3, "quality": "draft"}));
+    assert_eq!(published["frames"], 3, "{published}");
+    assert_eq!(published["width"], 160, "{published}");
+    let paths = published["paths"].as_array().expect("paths");
+    assert_eq!(paths.len(), 3);
+    let first = std::fs::read(paths[0].as_str().unwrap()).unwrap();
+    let last = std::fs::read(paths[2].as_str().unwrap()).unwrap();
+    assert!(first.starts_with(b"\x89PNG") && last.starts_with(b"\x89PNG"));
+    assert_ne!(first, last);
+    assert_eq!(s.doc.occurrences, placements);
+    let video = s.execute("anim.publish", &json!({"path": "show.mp4"})).unwrap_err();
+    assert!(video.to_string().contains("not supported yet"), "{video}");
+    assert_eq!(s.doc.occurrences, placements);
+    assert_ne!(a, b);
+    for path in paths {
+        let _ = std::fs::remove_file(path.as_str().unwrap_or_default());
+    }
 }

@@ -1,0 +1,125 @@
+{
+  "id": "pdf_day10_phone_case",
+  "day": 10,
+  "title": "Phone case",
+  "description": "Canvas, rectangle + spline, extrude, shell, pipe clearance cut.",
+  "commands": [
+    {
+      "command": "canvas.insert",
+      "params": {
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "plane": "XY",
+        "width": 80,
+        "name": "Phone"
+      }
+    },
+    {
+      "command": "canvas.calibrate",
+      "params": {
+        "canvas": "Phone",
+        "a": [
+          0,
+          0
+        ],
+        "b": [
+          40,
+          0
+        ],
+        "distance": 40
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Outline"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          0,
+          0
+        ],
+        "p1": [
+          60,
+          80
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.extrude",
+      "params": {
+        "sketch": "Outline",
+        "distance": 10,
+        "body_name": "Case"
+      }
+    },
+    {
+      "command": "solid.shell",
+      "params": {
+        "body": "Case",
+        "faces": [
+          [
+            30,
+            40,
+            10
+          ]
+        ],
+        "thickness": "1.5 mm"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Tunnel"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            5,
+            40
+          ],
+          [
+            55,
+            40
+          ]
+        ],
+        "ids": [
+          "path"
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.pipe",
+      "params": {
+        "path_sketch": "Tunnel",
+        "path": [
+          "path"
+        ],
+        "diameter": 4,
+        "operation": "cut",
+        "targets": [
+          "Case"
+        ]
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

@@ -48,7 +48,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("body? → flat size, outline loops and cut-outs (flat coordinates), bend lines and the bend table"),
     CommandSpec::new("sheet.export_dxf", "Export Flat Pattern as DXF", export_dxf)
         .noundo()
-        .params("body?, path? → DXF (mm): OUTLINE, BEND_UP and BEND_DOWN (centre lines) layers"),
+        .params("body?, path? → DXF (mm) + layers[]: OUTLINE, BEND_UP, BEND_DOWN, POCKET_*"),
     CommandSpec::new("sheet.export_bend_table", "Export Bend Table", export_bend_table)
         .noundo()
         .params("body?, format?: csv|json (default csv), path? → bend table in mm and degrees, including rule and flat centre-line coordinates"),
@@ -386,23 +386,34 @@ fn flat_pattern(s: &mut Session, p: &Value) -> Result<Value> {
     flat_json(&sh)
 }
 
+/// Layer names written into a flat-pattern DXF (`OUTLINE`, bend centre-lines, pockets).
+pub fn flat_dxf_layers(sh: &SheetBody) -> Result<Vec<String>> {
+    let pockets = sh.machining()?;
+    let mut layers = std::collections::BTreeSet::from(["OUTLINE".to_string(), "BEND_UP".to_string(), "BEND_DOWN".to_string()]);
+    for p in &pockets {
+        layers.insert(pocket_layer_name(sh, p));
+    }
+    Ok(layers.into_iter().collect())
+}
+
+fn pocket_layer_name(sh: &SheetBody, p: &solidcraft_doc::sheet::SheetPocket) -> String {
+    let side = if p.z0 == 0.0 {
+        "BOTTOM"
+    } else if p.z1 == sh.t {
+        "TOP"
+    } else {
+        "INTERNAL"
+    };
+    format!("POCKET_{side}_Z{:.6}_TO_{:.6}_MM", p.z0, p.z1)
+}
+
 /// A DXF (R12 entities, mm) of the flat pattern on named layers.
 pub fn flat_dxf(sh: &SheetBody) -> Result<String> {
     let regions = sh.flat_regions()?;
     let pockets = sh.machining()?;
-    let pocket_layer = |p: &solidcraft_doc::sheet::SheetPocket| {
-        let side = if p.z0 == 0.0 {
-            "BOTTOM"
-        } else if p.z1 == sh.t {
-            "TOP"
-        } else {
-            "INTERNAL"
-        };
-        format!("POCKET_{side}_Z{:.6}_TO_{:.6}_MM", p.z0, p.z1)
-    };
     let mut layers = std::collections::BTreeSet::from(["OUTLINE".to_string(), "BEND_UP".to_string(), "BEND_DOWN".to_string()]);
     for p in &pockets {
-        layers.insert(pocket_layer(p));
+        layers.insert(pocket_layer_name(sh, p));
     }
     let mut out = String::new();
     let mut w = |c: i32, v: &str| out.push_str(&format!("{c}\n{v}\n"));
@@ -445,7 +456,7 @@ pub fn flat_dxf(sh: &SheetBody) -> Result<String> {
     let mut loops: Vec<_> = regions.iter().flat_map(|r| std::iter::once(&r.outer).chain(&r.holes)).map(|lp| (lp, "OUTLINE".to_string())).collect();
     for p in &pockets {
         for lp in std::iter::once(&p.region.outer).chain(&p.region.holes) {
-            loops.push((lp, pocket_layer(p)));
+            loops.push((lp, pocket_layer_name(sh, p)));
         }
     }
     for (h, layer) in loops {
@@ -503,12 +514,13 @@ pub fn flat_dxf(sh: &SheetBody) -> Result<String> {
 fn export_dxf(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sheet.export_dxf";
     let sh = sheet_of(s, p, cmd)?;
+    let layers = flat_dxf_layers(&sh)?;
     let text = flat_dxf(&sh)?;
     if let Some(path) = str_(p, "path").filter(|x| !x.trim().is_empty()) {
         solidcraft_io::vfs::write(path, text.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-        return Ok(json!({"path": path, "bends": sh.bends().len()}));
+        return Ok(json!({"path": path, "bends": sh.bends().len(), "layers": layers}));
     }
-    Ok(json!({"dxf": text, "bends": sh.bends().len()}))
+    Ok(json!({"dxf": text, "bends": sh.bends().len(), "layers": layers}))
 }
 
 fn export_bend_table(s: &mut Session, p: &Value) -> Result<Value> {

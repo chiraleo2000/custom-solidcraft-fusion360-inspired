@@ -170,6 +170,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     table(app, ui, &mut d, &favs, "fav");
                 }
                 section(ui, &t, "User Parameters");
+                ui.label(
+                    RichText::new("Name a value once; other expressions can use it (length / 2). Edit rebuilds the model.")
+                        .color(t.text_dim)
+                        .size(11.0),
+                );
                 let users: Vec<&Row> = visible.iter().copied().filter(|r| r.source == "user").collect();
                 table(app, ui, &mut d, &users, "user");
                 add_row(app, ui, &mut d);

@@ -6,7 +6,8 @@ use serde_json::json;
 use crate::theme::Tokens;
 use crate::{SolveApp, icons};
 
-pub const TABS: &[&str] = &["SOLID", "SURFACE", "FORM", "MESH", "SHEET METAL", "PLASTIC", "DRAWING", "UTILITIES"];
+/// Design-workspace ribbon tabs (see [`crate::workspace::DESIGN_TABS`]).
+pub const TABS: &[&str] = crate::workspace::DESIGN_TABS;
 
 /// The accent stroke colour for a panel's icons: constraint commands use the same red as the
 /// constraint glyphs they draw in the sketch (`glyph_text`), sketch tools otherwise keep
@@ -525,7 +526,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         if sketching {
             tabs.push("SKETCH");
         }
-        tabs.extend(TABS.iter());
+        tabs.extend(crate::workspace::tabs_for_workspace(crate::toolbar_custom::WORKSPACE).iter().copied());
         for tab in tabs {
             let display_tab = app.tr_label(tab);
             let text_width = painter.layout_no_wrap(display_tab.to_string(), FontId::proportional(12.0), t.text).size().x;
@@ -990,11 +991,28 @@ fn pin_icon(p: &egui::Painter, r: Rect, on: bool, col: Color32) {
     p.line_segment([at(0.0, -2.0), at(0.0, 7.0)], stroke);
 }
 
-/// The SELECT panel: what a click in the view picks.
+/// The SELECT panel: drag mode, then what a click in the view picks.
 fn selection_filter(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
-    ui.label(egui::RichText::new("Selection filter").color(t.text_dim).size(11.0));
-    ui.checkbox(&mut app.ui.pick_bodies, "Select bodies (a face picks its body)");
+    ui.label(egui::RichText::new(app.tr("view.select_mode")).color(t.text_dim).size(11.0));
+    let mut mode = app.session.select_mode;
+    ui.horizontal(|ui| {
+        for (value, id, key) in
+            [(0u8, "box", "view.select_mode.window"), (1, "lasso", "view.select_mode.lasso"), (2, "paint", "view.select_mode.paint")]
+        {
+            let label = app.tr(key).to_string();
+            if ui.radio_value(&mut mode, value, label).clicked() {
+                let _ = app.run("view.select_mode", json!({"mode": id}));
+            }
+        }
+    });
+    ui.separator();
+    ui.label(egui::RichText::new(app.tr("view.select_filter")).color(t.text_dim).size(11.0));
+    let mut pick_bodies = app.ui.pick_bodies;
+    let bodies_label = app.tr("view.select_bodies").to_string();
+    if ui.checkbox(&mut pick_bodies, bodies_label).changed() {
+        app.ui.pick_bodies = pick_bodies;
+    }
     for (k, label) in [
         ("faces", "Faces"),
         ("edges", "Edges"),

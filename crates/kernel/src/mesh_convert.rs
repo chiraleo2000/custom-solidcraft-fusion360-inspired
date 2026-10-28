@@ -57,12 +57,20 @@ pub fn convert_prismatic_mesh(body: &Body, tolerance: f64) -> Result<Body> {
         if edges.values().any(|&(count, balance)| count != 2 || balance != 0) {
             return Err(invalid("mesh must be closed and consistently oriented, with two triangles per edge"));
         }
+        let normal_buckets = axes.len();
         let mut axes: Vec<_> = axes.into_values().collect();
         axes.sort_by(|a, b| b.1.total_cmp(&a.1));
         for (axis, _) in axes.into_iter().take(16) {
             if let Some(result) = extrusion(mesh, axis, tolerance)? {
                 return Ok(result);
             }
+        }
+        // Many distinct facet normals and no constant-section fit → organic / free-form.
+        // Keep the refuse explicit so callers do not fall back to a silent faceted solid.
+        if normal_buckets > 24 {
+            return Err(invalid(
+                "not supported yet: organic or free-form mesh conversion; prismatic mode needs a constant-section solid (use faceted for one face per triangle)",
+            ));
         }
         Err(invalid("this mesh is not a supported constant-section prism; no geometry was converted"))
     })
@@ -457,7 +465,8 @@ mod tests {
             assert!(convert_prismatic_mesh(&mesh_of(&solid), tolerance).is_err());
         }
         let sphere = crate::sphere(Vec3::ZERO, 10.).unwrap();
-        assert!(convert_prismatic_mesh(&mesh_of(&sphere), 0.05).is_err());
+        let organic = convert_prismatic_mesh(&mesh_of(&sphere), 0.05).unwrap_err().to_string();
+        assert!(organic.contains("not supported yet") && organic.contains("organic"), "{organic}");
         for coordinate in [f64::NAN, f64::INFINITY, f64::MAX, 1e30] {
             let mesh = crate::meshbody::TriMesh { positions: vec![Vec3::new(coordinate, 0., 0.)], triangles: vec![] };
             assert!(weld(&mesh, 0.05).is_err());

@@ -448,11 +448,33 @@ mod tests {
         run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "corner": [40, 0, 0], "body_name": "Block"}));
         assert!(s.execute("surface.patch", &json!({"body": "Block", "edges": [[45, 0, 10], [50, 5, 10]]})).is_err());
         assert_eq!(s.doc.features.len(), before + 1);
-        run(&mut s, "surface.patch", json!({"sketch": "Pad", "body": "Block", "edges": [[45, 0, 10], [50, 5, 10], [45, 10, 10], [40, 5, 10]]}));
+        // Mixed sketch outer + edge hole: one face whose area is the polygon minus the hole.
+        run(
+            &mut s,
+            "surface.patch",
+            json!({
+                "sketch": "Pad",
+                "edges": [[2, 2, 0], [4, 2, 0], [4, 4, 0], [2, 4, 0]],
+                "body_name": "WithHole"
+            }),
+        );
         assert!(matches!(
             s.doc.features.last().map(|f| &f.kind),
-            Some(FeatureKind::Patch { sketch: Some(_), edges, .. }) if !edges.is_empty()
+            Some(FeatureKind::Patch { sketch: Some(_), edges, .. }) if edges.len() == 4
         ));
+        let with_hole = s.world_state().body("WithHole").unwrap().body.clone();
+        assert!(with_hole.is_surface());
+        assert!((solidcraft_kernel::measure(&with_hole).unwrap().area - 96.0).abs() < 1e-3);
+        // Edges that do not form a hole in the sketch are refused; the design is unchanged.
+        let n = s.doc.features.len();
+        let err = s
+            .execute("surface.patch", &json!({"sketch": "Pad", "body": "Block", "edges": [[45, 0, 10], [50, 5, 10], [45, 10, 10], [40, 5, 10]]}))
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported yet"), "{err}");
+        assert_eq!(s.doc.features.len(), n);
+        // A lid still patches from a body's edge loop alone.
+        run(&mut s, "surface.patch", json!({"body": "Block", "edges": [[45, 0, 10], [50, 5, 10], [45, 10, 10], [40, 5, 10]], "body_name": "Lid"}));
+        assert!(s.world_state().body("Lid").unwrap().body.is_surface());
 
         run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Cut"}));
         let curve = run(&mut s, "sketch.line", json!({"points": [[4, 0], [4, 10]]}))["curves"][0].as_str().unwrap().to_string();

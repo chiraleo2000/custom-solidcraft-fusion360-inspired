@@ -1,0 +1,83 @@
+{
+  "id": "pdf_day29_drawing",
+  "day": 29,
+  "title": "2D drawing",
+  "description": "Base/projected views, dimension, parts list, title block, SVG export (Year 2).",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "solid.box",
+      "params": {
+        "length": 40,
+        "width": 20,
+        "height": 12,
+        "body_name": "Block"
+      }
+    },
+    {
+      "command": "component.create",
+      "params": {
+        "name": "Base"
+      }
+    },
+    {
+      "command": "component.create",
+      "params": {
+        "name": "Lid"
+      }
+    },
+    {
+      "command": "drawing.create",
+      "params": {
+        "name": "Sheet1"
+      }
+    },
+    {
+      "command": "drawing.standard",
+      "params": {
+        "standard": "third_angle",
+        "arrows": "filled"
+      }
+    },
+    {
+      "command": "drawing.base_view",
+      "params": {
+        "direction": [0, 0, -1],
+        "origin": [0, 0],
+        "hidden": true
+      }
+    },
+    {
+      "command": "drawing.project",
+      "params": {
+        "from": 0,
+        "side": "right",
+        "origin": [60, 0]
+      }
+    },
+    {
+      "command": "drawing.dimension",
+      "params": {
+        "body": "Block",
+        "axis": "z",
+        "at": [0, -20]
+      }
+    },
+    {
+      "command": "drawing.parts_list",
+      "params": {}
+    },
+    {
+      "command": "drawing.title_block",
+      "params": {
+        "title": "Day29 Bracket",
+        "size": "A4",
+        "template": "iso"
+      }
+    },
+    {
+      "command": "drawing.export_svg",
+      "params": {}
+    }
+  ]
+}

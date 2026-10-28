@@ -164,6 +164,7 @@ pub fn write_drawing_dxf(segs: &[DrawSeg], texts: &[DrawText]) -> String {
 }
 
 /// SVG 1.1 of the same segments. Y is flipped so the sheet reads upright in a viewer.
+/// Segments and labels are grouped by SolidCraft layer (`VISIBLE`, `HIDDEN`, …).
 pub fn write_drawing_svg(segs: &[DrawSeg], texts: &[DrawText]) -> String {
     let mut pts = Vec::new();
     for seg in segs.iter().take(8_000) {
@@ -192,29 +193,35 @@ pub fn write_drawing_svg(segs: &[DrawSeg], texts: &[DrawText]) -> String {
         if minx.is_finite() { (minx - 8.0, miny - 8.0, maxx + 8.0, maxy + 8.0) } else { (-200.0, -200.0, 200.0, 200.0) }
     };
     let mut body = String::new();
-    for seg in segs.iter().take(8_000) {
-        let a = svg_xy(seg.a);
-        let b = svg_xy(seg.b);
-        if !finite(a[0]) || !finite(a[1]) || !finite(b[0]) || !finite(b[1]) {
-            continue;
+    for kind in [DrawKind::Visible, DrawKind::Hidden, DrawKind::Section, DrawKind::Title, DrawKind::Annotation] {
+        let mut group = String::new();
+        for seg in segs.iter().take(8_000).filter(|s| s.kind == kind) {
+            let a = svg_xy(seg.a);
+            let b = svg_xy(seg.b);
+            if !finite(a[0]) || !finite(a[1]) || !finite(b[0]) || !finite(b[1]) {
+                continue;
+            }
+            let (stroke, width, dash) = svg_style(seg.kind);
+            group.push_str(&format!(
+                "<line x1=\"{:.3}\" y1=\"{:.3}\" x2=\"{:.3}\" y2=\"{:.3}\" stroke=\"{stroke}\" stroke-width=\"{width:.2}\" {dash}/>",
+                a[0], a[1], b[0], b[1]
+            ));
         }
-        let (stroke, width, dash) = svg_style(seg.kind);
-        body.push_str(&format!(
-            "<line x1=\"{:.3}\" y1=\"{:.3}\" x2=\"{:.3}\" y2=\"{:.3}\" stroke=\"{stroke}\" stroke-width=\"{width:.2}\" {dash}/>",
-            a[0], a[1], b[0], b[1]
-        ));
-    }
-    for text in texts.iter().take(2_000) {
-        let shown = plain(&text.text);
-        if shown.is_empty() {
-            continue;
+        for text in texts.iter().take(2_000).filter(|t| t.kind == kind) {
+            let shown = plain(&text.text);
+            if shown.is_empty() {
+                continue;
+            }
+            let at = svg_xy(text.at);
+            if !finite(at[0]) || !finite(at[1]) {
+                continue;
+            }
+            let height = if finite(text.height) && text.height > 0.0 { text.height } else { 3.0 };
+            group.push_str(&format!("<text x=\"{:.3}\" y=\"{:.3}\" font-size=\"{height:.2}\" fill=\"#111\">{shown}</text>", at[0], at[1]));
         }
-        let at = svg_xy(text.at);
-        if !finite(at[0]) || !finite(at[1]) {
-            continue;
+        if !group.is_empty() {
+            body.push_str(&format!("<g id=\"{}\" data-layer=\"{}\">{group}</g>", kind.layer(), kind.layer()));
         }
-        let height = if finite(text.height) && text.height > 0.0 { text.height } else { 3.0 };
-        body.push_str(&format!("<text x=\"{:.3}\" y=\"{:.3}\" font-size=\"{height:.2}\" fill=\"#111\">{shown}</text>", at[0], at[1]));
     }
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{minx:.3} {miny:.3} {:.3} {:.3}\">{body}</svg>",
@@ -239,6 +246,11 @@ fn svg_style(kind: DrawKind) -> (&'static str, f64, &'static str) {
 
 /// One-page PDF. `page_mm` is the sheet width and height. The drawing is fitted inside a margin.
 pub fn write_drawing_pdf(page_mm: [f64; 2], segs: &[DrawSeg], texts: &[DrawText]) -> String {
+    write_drawing_pdf_titled(page_mm, "SolidCraft", segs, texts)
+}
+
+/// One-page PDF with a document `/Title` in the Info dictionary (ISO 32000-1).
+pub fn write_drawing_pdf_titled(page_mm: [f64; 2], title: &str, segs: &[DrawSeg], texts: &[DrawText]) -> String {
     let page_w = if finite(page_mm[0]) && page_mm[0] > 10.0 { page_mm[0] } else { 297.0 };
     let page_h = if finite(page_mm[1]) && page_mm[1] > 10.0 { page_mm[1] } else { 210.0 };
     let pt = 72.0 / 25.4;
@@ -264,14 +276,34 @@ pub fn write_drawing_pdf(page_mm: [f64; 2], segs: &[DrawSeg], texts: &[DrawText]
     }
     let contents = format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len());
     let page = format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>");
+    let info_title = pdf_escape(title);
+    let info = format!("<< /Title ({info_title}) /Producer (SolidCraft) >>");
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
         page,
         contents,
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        info,
     ];
-    assemble(&objects)
+    assemble_with_info(&objects, 6)
+}
+
+fn assemble_with_info(objects: &[String], info_obj: usize) -> String {
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{body}\nendobj\n", i + 1));
+    }
+    let startxref = out.len();
+    out.push_str(&format!("xref\n0 {}\n", objects.len() + 1));
+    out.push_str("0000000000 65535 f \n");
+    for off in &offsets {
+        out.push_str(&format!("{off:010} 00000 n \n"));
+    }
+    out.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R /Info {} 0 R >>\nstartxref\n{startxref}\n%%EOF\n", objects.len() + 1, info_obj));
+    out
 }
 
 struct Fit {
@@ -335,23 +367,6 @@ fn pdf_stroke(kind: DrawKind) -> &'static str {
     }
 }
 
-fn assemble(objects: &[String]) -> String {
-    let mut out = String::from("%PDF-1.4\n");
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (i, body) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.push_str(&format!("{} 0 obj\n{body}\nendobj\n", i + 1));
-    }
-    let startxref = out.len();
-    out.push_str(&format!("xref\n0 {}\n", objects.len() + 1));
-    out.push_str("0000000000 65535 f \n");
-    for off in &offsets {
-        out.push_str(&format!("{off:010} 00000 n \n"));
-    }
-    out.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n", objects.len() + 1));
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +400,7 @@ mod tests {
             let pdf = write_drawing_pdf([297.0, 210.0], &segs, &texts);
             assert!(pdf.starts_with("%PDF-1.4\n"), "{pdf}");
             assert!(pdf.contains(" l ") && pdf.contains("Helvetica") && pdf.contains("xref\n"), "{pdf}");
+            assert!(pdf.contains("/Info 6 0 R") && pdf.contains("/Title (SolidCraft)"), "{pdf}");
             let marker = "startxref\n";
             let at = pdf.find(marker).expect("startxref");
             let off: usize = pdf[at + marker.len()..].lines().next().unwrap_or("0").trim().parse().unwrap_or(0);
@@ -395,5 +411,16 @@ mod tests {
         assert_eq!(cases, 100);
         let empty = write_drawing_pdf([0.0, 0.0], &[], &[]);
         assert!(empty.contains("%PDF-1.4") && empty.contains(" l "));
+        let titled = write_drawing_pdf_titled([420.0, 297.0], "Bracket", &segs_sample(), &[]);
+        assert!(titled.contains("/Title (Bracket)") && titled.contains("MediaBox [0 0 1190.55 841.89]"), "{titled}");
+        let svg = write_drawing_svg(
+            &[DrawSeg { a: [0.0, 0.0], b: [10.0, 0.0], kind: DrawKind::Visible }, DrawSeg { a: [0.0, 1.0], b: [10.0, 1.0], kind: DrawKind::Hidden }],
+            &[DrawText { at: [1.0, 2.0], text: "Hi".into(), height: 3.0, kind: DrawKind::Annotation }],
+        );
+        assert!(svg.contains("id=\"VISIBLE\"") && svg.contains("id=\"HIDDEN\"") && svg.contains("id=\"ANNOTATION\""), "{svg}");
+    }
+
+    fn segs_sample() -> [DrawSeg; 1] {
+        [line(0.0, DrawKind::Visible)]
     }
 }

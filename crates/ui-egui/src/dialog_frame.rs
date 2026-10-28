@@ -6,6 +6,11 @@ pub fn footer_labels() -> [&'static str; 2] {
     ["Cancel", "OK"]
 }
 
+/// Stable message ids for the default dismiss/confirm footer (resolved via `i18n::tr`).
+pub fn footer_message_ids() -> [&'static str; 2] {
+    ["ui.cancel", "ui.heading_ok"]
+}
+
 /// Dismiss then confirm, so every dialog paints Cancel (or Close) before OK.
 pub fn action_labels<'a>(dismiss: &'a str, confirm: &'a str) -> [&'a str; 2] {
     [dismiss, confirm]
@@ -39,6 +44,9 @@ mod tests {
     fn property_17_cancel_leaves_the_design_and_the_footer_stays_reachable() {
         assert!(footer_outside_scroll());
         assert_eq!(footer_labels(), ["Cancel", "OK"]);
+        assert_eq!(super::footer_message_ids(), ["ui.cancel", "ui.heading_ok"]);
+        assert_eq!(crate::i18n::tr("ui.cancel"), "Cancel");
+        assert_eq!(crate::i18n::tr("ui.heading_ok"), "OK");
         assert_eq!(super::action_labels("Cancel", "OK"), ["Cancel", "OK"]);
         assert_eq!(super::action_labels("Close", "Delete"), ["Close", "Delete"]);
         let mut cases = 0usize;

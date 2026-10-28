@@ -1,0 +1,71 @@
+{
+  "id": "pdf_day23_joints",
+  "day": 23,
+  "title": "Joints smoke",
+  "description": "Two components, as-built rigid joint, interference and measure stay available.",
+  "smoke": true,
+  "commands": [
+    {
+      "command": "component.create",
+      "params": {
+        "name": "A",
+        "activate": true
+      }
+    },
+    {
+      "command": "solid.box",
+      "params": {
+        "length": 10,
+        "width": 10,
+        "height": 10,
+        "body_name": "ABody"
+      }
+    },
+    {
+      "command": "component.activate",
+      "params": {
+        "component": "root"
+      }
+    },
+    {
+      "command": "component.create",
+      "params": {
+        "name": "B",
+        "activate": true
+      }
+    },
+    {
+      "command": "solid.box",
+      "params": {
+        "length": 10,
+        "width": 10,
+        "height": 10,
+        "corner": [20, 0, 0],
+        "body_name": "BBody"
+      }
+    },
+    {
+      "command": "component.activate",
+      "params": {
+        "component": "root"
+      }
+    },
+    {
+      "command": "joint.as_built",
+      "params": {
+        "type": "rigid",
+        "a": "A",
+        "b": "B",
+        "name": "Lock"
+      }
+    },
+    {
+      "command": "inspect.interference",
+      "params": {}
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

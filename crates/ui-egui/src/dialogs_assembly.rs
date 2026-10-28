@@ -402,13 +402,29 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.end_row();
             row_label(ui, "Activate");
-            ui.checkbox(activate, "");
+            ui.checkbox(activate, "sketch and features go here");
+            ui.end_row();
+            ui.label("");
+            ui.label(RichText::new("A body stays a body until it is in a component.").color(t.text_dim).size(11.0));
             ui.end_row();
         }
         Asm::Joint(f) => {
             // As-built: two components picked, the position comes next.
             if f.as_built && *active == 0 && inputs.first().is_some_and(|i| i.items.len() >= 2) {
                 *active = 1;
+            }
+            if f.as_built {
+                ui.label("");
+                ui.label(RichText::new("Keep parts where they sit; pick two components, then a snap.").color(t.text_dim).size(11.0));
+                ui.end_row();
+            } else {
+                ui.label("");
+                ui.label(
+                    RichText::new("Hover faces/edges/vertices for snaps. Set limits here; Drive Joints and Motion Link are on ASSEMBLE.")
+                        .color(t.text_dim)
+                        .size(11.0),
+                );
+                ui.end_row();
             }
             row_label(ui, "Motion");
             ui.label("");
@@ -481,6 +497,9 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
                 ui.end_row();
                 return false;
             }
+            ui.label("");
+            ui.label(RichText::new("Limits clamp the slider. Use Interference and Measure to check clearances.").color(t.text_dim).size(11.0));
+            ui.end_row();
             let labels: Vec<String> =
                 list.iter().filter_map(|i| s.doc.assembly.joints.get(*i)).map(|j| format!("{} ({:?})", j.name, j.kind)).collect();
             let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -556,6 +575,9 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
                 ui.end_row();
                 return false;
             }
+            ui.label("");
+            ui.label(RichText::new("Driving one joint moves the linked joint by ratio × value + offset.").color(t.text_dim).size(11.0));
+            ui.end_row();
             let labels: Vec<&str> = joints.iter().map(|j| j.name.as_str()).collect();
             for (l, sel, idx, id) in [("Joint 1", &mut *a, &mut *ia, "ml_a"), ("Joint 2", &mut *b, &mut *ib, "ml_b")] {
                 row_label(ui, l);
@@ -581,6 +603,9 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Asm, inputs: &mut [Se
         }
         Asm::Interference { result, overlaps, of } => {
             let picked: Vec<Sel> = inputs.first().map(|i| i.items.clone()).unwrap_or_default();
+            ui.label("");
+            ui.label(RichText::new("Overlap volumes in red. Measure gives distances and body volumes.").color(t.text_dim).size(11.0));
+            ui.end_row();
             row_label(ui, "");
             let stale = result.is_some() && *of != picked;
             if ui.button(if stale { "Compute again" } else { "Compute" }).clicked() {
@@ -998,6 +1023,10 @@ fn joint_menu(
     }
     if kind != JointKind::Rigid && ui.button("Drive Joint").clicked() {
         *open = drive_joint(app, id);
+        ui.close();
+    }
+    if kind != JointKind::Rigid && ui.button("Edit Limits").clicked() {
+        *open = edit_joint(app, id);
         ui.close();
     }
     if ui.button(if suppressed { "Unsuppress" } else { "Suppress" }).clicked() {

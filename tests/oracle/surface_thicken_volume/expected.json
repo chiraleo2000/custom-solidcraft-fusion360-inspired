@@ -1,0 +1,30 @@
+{
+  "source": "analytic",
+  "method": "planar rectangle 10 × 10 thickened by 2 mm along the normal: solid V = A × t = 100 × 2 = 200; centre at (5, 5, 1). The source surface body remains beside the solid.",
+  "compare": [
+    "body_count",
+    "volume_mm3",
+    "center_of_mass",
+    "bbox"
+  ],
+  "body_count": 2,
+  "volume_mm3": 200.0,
+  "center_of_mass": [
+    5.0,
+    5.0,
+    1.0
+  ],
+  "bbox": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      10.0,
+      10.0,
+      2.0
+    ]
+  },
+  "note": "surface.patch leaves Sheet; surface.thicken adds Slab. Volume and COM are of the solid only (surface volume is zero)."
+}

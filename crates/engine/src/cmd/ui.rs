@@ -107,21 +107,14 @@ fn select_filter(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn quick_toolbox(s: &mut Session, p: &Value) -> Result<Value> {
-    let query = crate::params::str_(p, "query").unwrap_or("").to_ascii_lowercase();
+    let query = crate::params::str_(p, "query").unwrap_or("");
     if query.len() > 200 {
         return Err(bad("ui.quick_toolbox", "the query is too long"));
     }
-    let mut ids = Vec::new();
-    for spec in super::command_specs() {
-        if query.is_empty() || spec.id.contains(&query) || spec.label.to_ascii_lowercase().contains(&query) {
-            ids.push(spec.id);
-        }
-        if ids.len() >= 50 {
-            break;
-        }
-    }
-    let _ = s;
-    Ok(serde_json::json!({"commands": ids}))
+    let specs = super::command_specs();
+    let hits = crate::shell_discovery::toolbox_search(s, query, &specs, crate::shell_discovery::TOOLBOX_LIMIT);
+    let ids: Vec<&str> = hits.iter().map(|c| c.id).collect();
+    Ok(serde_json::json!({"commands": ids, "query": query}))
 }
 
 fn repeat_last(s: &mut Session, _p: &Value) -> Result<Value> {
@@ -133,23 +126,14 @@ fn repeat_last(s: &mut Session, _p: &Value) -> Result<Value> {
 
 fn context_menu(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ui.context_menu";
-    let area = crate::params::str_(p, "area").unwrap_or("SOLID").to_ascii_uppercase();
+    let area = crate::params::str_(p, "area").unwrap_or("SOLID");
     if area.len() > 32 {
         return Err(bad(cmd, "the area name is too long"));
     }
-    let mut ids = Vec::new();
-    if s.last_command.is_some() {
-        ids.push("ui.repeat_last");
-    }
-    for spec in super::command_specs() {
-        if spec.tab == area && (spec.enabled)(s).is_ok() {
-            ids.push(spec.id);
-        }
-        if ids.len() >= 40 {
-            break;
-        }
-    }
-    Ok(serde_json::json!({"commands": ids}))
+    let specs = super::command_specs();
+    let hits = crate::shell_discovery::context_menu_entries(s, area, &specs, crate::shell_discovery::CONTEXT_MENU_LIMIT);
+    let ids: Vec<&str> = hits.iter().map(|c| c.id).collect();
+    Ok(serde_json::json!({"commands": ids, "area": area}))
 }
 
 fn select_depth(s: &mut Session, p: &Value) -> Result<Value> {
@@ -248,5 +232,21 @@ mod tests {
         assert_eq!(v["completed"], json!(true));
         assert_eq!(v["index"], json!(5));
         assert_eq!(s.undo.len(), 0);
+    }
+
+    #[test]
+    fn quick_toolbox_and_context_menu_use_pure_builders() {
+        let mut s = Session::default();
+        let v = run(&mut s, "ui.quick_toolbox", json!({"query": "press"}));
+        let cmds = v["commands"].as_array().expect("commands");
+        assert!(cmds.iter().any(|c| c.as_str() == Some("solid.press_pull")), "{v}");
+        assert!(cmds.len() <= 50);
+        assert!(s.execute("ui.quick_toolbox", &json!({"query": "x".repeat(201)})).is_err());
+        let menu = run(&mut s, "ui.context_menu", json!({"area": "SOLID"}));
+        assert!(menu["commands"].as_array().unwrap().iter().any(|c| c.as_str() == Some("solid.extrude")));
+        assert!(!menu["commands"].as_array().unwrap().iter().any(|c| c.as_str() == Some("ui.repeat_last")));
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+        let menu = run(&mut s, "ui.context_menu", json!({"area": "SOLID"}));
+        assert_eq!(menu["commands"].as_array().unwrap().first().and_then(|c| c.as_str()), Some("ui.repeat_last"));
     }
 }

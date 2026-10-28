@@ -22,17 +22,17 @@ mod threemf;
 pub mod vfs;
 
 mod gerber;
-pub use gerber::{GerberLayer, GerberTrace, read_gerber, write_gerber};
+pub use gerber::{GerberLayer, GerberRegion, GerberTrace, read_gerber, write_gerber};
 mod drawing_out;
-pub use drawing_out::{DrawKind, DrawSeg, DrawText, write_drawing_dxf, write_drawing_pdf, write_drawing_svg};
+pub use drawing_out::{DrawKind, DrawSeg, DrawText, write_drawing_dxf, write_drawing_pdf, write_drawing_pdf_titled, write_drawing_svg};
 pub use dxf::{read_dxf, write_dxf};
 pub use legacy_dir::adopt_legacy_dir;
 pub use safe_write::{backup_path, write_atomic};
 pub use sketch2d::{Geom2, MAX_DRAWING_BYTES};
 pub use svg::read_svg;
-mod obj;
 mod mesh_out;
-pub use mesh_out::{MAX_EXPORT_TRIANGLES, MeshExport};
+mod obj;
+pub use mesh_out::{MAX_EXPORT_TRIANGLES, MeshExport, check_triangle_count};
 pub use obj::read_obj;
 pub use threemf::{MAX_3MF_BYTES, MeshObject, model_xml, read_3mf, weld, write_3mf};
 
@@ -278,9 +278,11 @@ fn proprietary_hint(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "fbx" => "gltf/glb",
         "blend" => "gltf/glb or obj",
-        "max" | "c4d" | "ma" | "mb" | "skp" => "gltf/glb",
+        "max" | "c4d" | "ma" | "mb" => "gltf/glb",
+        "skp" => "gltf/glb or obj",
         "dwg" => "dxf",
-        "sldprt" | "sldasm" | "f3d" | "ipt" | "iam" | "sat" | "x_t" | "x_b" | "x_t_bin" => "step/stp",
+        "sldprt" | "sldasm" | "ipt" | "iam" | "sat" | "x_t" | "x_b" | "x_t_bin" => "step/stp",
+        "f3d" => "step/stp or solidcraft",
         "parasolid" => "step/stp",
         _ => return None,
     })
@@ -333,12 +335,12 @@ pub fn stl_ascii(meshes: &[Mesh], name: &str) -> String {
     s
 }
 
-/// Wavefront OBJ, one object per body (no materials).
-pub fn obj(meshes: &[(String, Mesh)]) -> String {
-    let bodies: Vec<MeshExport> = meshes
-        .iter()
-        .filter_map(|(name, m)| MeshExport::from_body(name.clone(), m.clone(), None, 1.0).ok())
-        .collect();
+/// Wavefront OBJ, one object per body (with optional empty `mtllib` when no sidecar name).
+pub fn obj(meshes: &[(String, Mesh)]) -> Result<String> {
+    let mut bodies = Vec::with_capacity(meshes.len());
+    for (name, m) in meshes {
+        bodies.push(MeshExport::from_body(name.clone(), m.clone(), None, 1.0)?);
+    }
     mesh_out::write_obj_with_mtl(&bodies, "")
 }
 
@@ -350,7 +352,7 @@ pub fn export_sidecars(state: &ModelState, bodies: &[String], format: Format, na
     let sel = selected_bodies(state, bodies)?;
     let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
     let mtl_name = format!("{name}.mtl");
-    Ok(vec![(mtl_name, mesh_out::write_mtl(&meshes).into_bytes())])
+    Ok(vec![(mtl_name, mesh_out::write_mtl(&meshes)?.into_bytes())])
 }
 
 fn selected_bodies<'a>(state: &'a ModelState, bodies: &[String]) -> Result<Vec<&'a solidcraft_doc::ModelBody>> {
@@ -379,11 +381,11 @@ pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str)
         Format::Obj => {
             let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
             let mtl = format!("{name}.mtl");
-            mesh_out::write_obj_with_mtl(&meshes, &mtl).into_bytes()
+            mesh_out::write_obj_with_mtl(&meshes, &mtl)?.into_bytes()
         }
         Format::Mtl => {
             let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
-            mesh_out::write_mtl(&meshes).into_bytes()
+            mesh_out::write_mtl(&meshes)?.into_bytes()
         }
         Format::Step => {
             let bs: Vec<solidcraft_kernel::ExportBody> =
@@ -434,27 +436,27 @@ pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str)
         }
         Format::Ply => {
             let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
-            mesh_out::write_ply(&meshes).into_bytes()
+            mesh_out::write_ply(&meshes)?.into_bytes()
         }
         Format::Amf => {
             let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
-            mesh_out::write_amf(&meshes, name).into_bytes()
+            mesh_out::write_amf(&meshes, name)?.into_bytes()
         }
         Format::Dae => {
             let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
-            mesh_out::write_dae(&meshes, name).into_bytes()
+            mesh_out::write_dae(&meshes, name)?.into_bytes()
         }
         Format::X3d => {
             let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
-            mesh_out::write_x3d(&meshes, name).into_bytes()
+            mesh_out::write_x3d(&meshes, name)?.into_bytes()
         }
         Format::Vrml => {
             let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
-            mesh_out::write_vrml(&meshes, name).into_bytes()
+            mesh_out::write_vrml(&meshes, name)?.into_bytes()
         }
         Format::Usda => {
             let meshes = mesh_out::collect_meshes(&sel, export_mesh)?;
-            mesh_out::write_usda(&meshes, name).into_bytes()
+            mesh_out::write_usda(&meshes, name)?.into_bytes()
         }
         Format::Design => return Err(IoError::Format("solidcraft (save the document instead)".into())),
     })
@@ -801,5 +803,88 @@ mod tests {
         assert!(mesh_import_feature(b"PK", "x.3mf").is_err());
         assert!(mesh_import_feature(&[0u8; 84], "x.stl").is_err());
         assert!(is_mesh_path("a.3MF") && is_mesh_path("b.stl") && !is_mesh_path("c.step"));
+    }
+
+    /// Req 15.7: proprietary vendor extensions refuse with the public equivalent; no file semantics.
+    #[test]
+    fn proprietary_formats_name_the_public_equivalent() {
+        let cases = [
+            ("fbx", "gltf"),
+            ("blend", "gltf"),
+            ("max", "gltf"),
+            ("c4d", "gltf"),
+            ("ma", "gltf"),
+            ("mb", "gltf"),
+            ("skp", "gltf"),
+            ("dwg", "dxf"),
+            ("sldprt", "step"),
+            ("sldasm", "step"),
+            ("f3d", "step"),
+            ("ipt", "step"),
+            ("iam", "step"),
+            ("sat", "step"),
+            ("x_t", "step"),
+            ("x_b", "step"),
+            ("parasolid", "step"),
+        ];
+        for (ext, hint_part) in cases {
+            match Format::from_name(&format!("part.{ext}")) {
+                Err(IoError::Proprietary { requested, hint }) => {
+                    assert_eq!(requested, ext);
+                    assert!(hint.contains(hint_part), "{ext}: hint `{hint}` missing `{hint_part}`");
+                }
+                other => panic!("{ext}: expected Proprietary, got {other:?}"),
+            }
+        }
+        match Format::from_name("part.usdc") {
+            Err(IoError::NotSupportedYet(msg)) => assert!(msg.contains("usda") || msg.contains("usd"), "{msg}"),
+            other => panic!("usdc: {other:?}"),
+        }
+        match Format::from_name("part.usdz") {
+            Err(IoError::NotSupportedYet(_)) => {}
+            other => panic!("usdz: {other:?}"),
+        }
+        // Public interchange extensions resolve (MTL / glTF / USDA are wasm-safe writers).
+        for (name, want) in [
+            ("a.mtl", Format::Mtl),
+            ("a.gltf", Format::Gltf),
+            ("a.glb", Format::Glb),
+            ("a.usda", Format::Usda),
+            ("a.usd", Format::Usda),
+            ("a.ply", Format::Ply),
+            ("a.vrm", Format::Vrm),
+        ] {
+            assert_eq!(Format::from_name(name).unwrap(), want);
+            assert!(want.is_tessellated());
+        }
+        assert!(check_triangle_count(MAX_EXPORT_TRIANGLES).is_ok());
+        assert!(check_triangle_count(MAX_EXPORT_TRIANGLES + 1).is_err());
+    }
+
+    #[test]
+    fn public_interchange_writers_export_structurally() {
+        let (_, m) = model();
+        let st = m.state();
+        let bytes = export(&st, &[], Format::Mtl, "t").unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("newmtl "));
+        let bytes = export(&st, &[], Format::Gltf, "t").unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("\"meshes\""));
+        let bytes = export(&st, &[], Format::Glb, "t").unwrap();
+        assert_eq!(&bytes[..4], b"glTF");
+        let bytes = export(&st, &[], Format::Usda, "t").unwrap();
+        assert!(String::from_utf8_lossy(&bytes).starts_with("#usda 1.0"));
+        let bytes = export(&st, &[], Format::Ply, "t").unwrap();
+        assert!(String::from_utf8_lossy(&bytes).starts_with("ply"));
+        let bytes = export(&st, &[], Format::Amf, "t").unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("<amf"));
+        let bytes = export(&st, &[], Format::Dae, "t").unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("<COLLADA"));
+        let bytes = export(&st, &[], Format::X3d, "t").unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("<X3D"));
+        let bytes = export(&st, &[], Format::Vrml, "t").unwrap();
+        assert!(String::from_utf8_lossy(&bytes).starts_with("#VRML"));
+        let bytes = export(&st, &[], Format::Vrm, "t").unwrap();
+        assert_eq!(&bytes[..4], b"glTF");
+        assert!(matches!(export(&st, &["nope".into()], Format::Gltf, "t"), Err(IoError::Empty)));
     }
 }

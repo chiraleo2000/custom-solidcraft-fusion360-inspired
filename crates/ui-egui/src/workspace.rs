@@ -88,14 +88,75 @@ const PLASTIC_CREATE: &[&str] = &[
     "joint.origin",
 ];
 
+/// Design-workspace ribbon tabs. Manufacture / Simulation / Render / Animation stay out until
+/// those workspaces deepen; Drawing stays reachable for seeded drawing commands.
+pub const DESIGN_TABS: &[&str] = &["SOLID", "SURFACE", "FORM", "MESH", "SHEET METAL", "PLASTIC", "DRAWING", "ELECTRONICS", "UTILITIES"];
+
+/// Ribbon tabs for a workspace name (`DESIGN` today). Unknown names fall back to Design.
+pub fn tabs_for_workspace(workspace: &str) -> &'static [&'static str] {
+    match workspace.trim().to_ascii_uppercase().as_str() {
+        "DESIGN" | "" => DESIGN_TABS,
+        // Later workspaces deepen here; until then they share the Design ribbon so the shell
+        // never shows an empty tab strip.
+        _ => DESIGN_TABS,
+    }
+}
+
 /// Panels of a tab, when this module lays the tab out.
 pub fn panels(tab: &str) -> Option<&'static [&'static str]> {
     match tab {
         "SOLID" => Some(&["CREATE", "MODIFY", "ASSEMBLE", "POSITION", "CONFIGURE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"]),
         "PLASTIC" => Some(&["SETUP", "CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"]),
+        "ELECTRONICS" => Some(&["CREATE", "INSPECT"]),
         _ => None,
     }
 }
+
+/// Solid MODIFY panel order: Press/Pull first so the unified edit gesture is a toolbar button.
+const SOLID_MODIFY: &[&str] = &[
+    "solid.press_pull",
+    "solid.fillet",
+    "solid.chamfer",
+    "solid.shell",
+    "solid.move",
+    "solid.combine",
+    "solid.offset_face",
+    "solid.draft",
+    "solid.split_body",
+    "solid.split_face",
+    "face.delete",
+    "solid.scale",
+    "solid.remove",
+];
+
+/// Drawing CREATE: base view first, then project/section/detail and exports.
+const DRAWING_CREATE: &[&str] = &[
+    "drawing.create",
+    "drawing.base_view",
+    "drawing.project",
+    "drawing.section",
+    "drawing.detail",
+    "drawing.export_svg",
+    "drawing.export_dxf",
+    "drawing.export_pdf",
+];
+
+/// Drawing MODIFY: dimensions and BOM/balloons before notes.
+const DRAWING_MODIFY: &[&str] = &[
+    "drawing.dimension",
+    "drawing.center_mark",
+    "drawing.balloon",
+    "drawing.parts_list",
+    "drawing.title_block",
+    "drawing.standard",
+    "drawing.note",
+    "drawing.leader",
+];
+
+/// Electronics CREATE: board → copper → push/export (autoroute stays refused in-command).
+const ELECTRONICS_CREATE: &[&str] = &["ecad.schematic", "ecad.board", "ecad.trace", "ecad.wire", "ecad.push_3d", "ecad.export"];
+
+const ELECTRONICS_INSPECT: &[&str] = &["ecad.erc", "ecad.drc"];
 
 /// The commands a panel shows, in order, and how many get a big button; `None` leaves the panel
 /// to the registry.
@@ -118,11 +179,16 @@ pub fn layout<'a>(tab: &str, panel: &str, specs: &[&'a CommandSpec]) -> Option<(
             tab,
         ),
         ("SOLID", "CONFIGURE") => (&["parameters.change", "config.table"], 2, tab),
+        ("SOLID", "MODIFY") => (SOLID_MODIFY, 4, tab),
         ("SOLID" | "SHEET METAL" | "PLASTIC", "ASSEMBLE") => (ASSEMBLE, 4, tab),
         ("SHEET METAL", "CREATE") => (SHEET_CREATE, 3, tab),
         ("SHEET METAL", "MODIFY") => (SHEET_MODIFY, 2, tab),
         ("PLASTIC", "SETUP") => (PLASTIC_SETUP, 2, tab),
         ("PLASTIC", "CREATE") => (PLASTIC_CREATE, 5, tab),
+        ("DRAWING", "CREATE") => (DRAWING_CREATE, 4, tab),
+        ("DRAWING", "MODIFY") => (DRAWING_MODIFY, 4, tab),
+        ("ELECTRONICS", "CREATE") => (ELECTRONICS_CREATE, 4, tab),
+        ("ELECTRONICS", "INSPECT") => (ELECTRONICS_INSPECT, 2, tab),
         // The solid tab's panels.
         ("PLASTIC", "MODIFY") => (&[], 4, "SOLID"),
         ("SURFACE" | "SHEET METAL" | "PLASTIC", "CONSTRUCT" | "INSPECT" | "INSERT") => (&[], 2, "SOLID"),
@@ -221,5 +287,22 @@ mod tests {
         let trim = sketch.0.iter().position(|c| c.id == "sketch.trim").expect("trim");
         assert!(trim < sketch.1, "trim is a large button");
         assert!(panels("PLASTIC").is_some_and(|p| p.first() == Some(&"SETUP")));
+        let modify = ids("SOLID", "MODIFY");
+        assert_eq!(modify.first().copied(), Some("solid.press_pull"), "{modify:?}");
+        assert!(tabs_for_workspace("DESIGN").contains(&"SOLID"));
+        assert!(tabs_for_workspace("DESIGN").contains(&"SURFACE"));
+        assert!(tabs_for_workspace("DESIGN").contains(&"ELECTRONICS"));
+        assert!(tabs_for_workspace("DESIGN").contains(&"DRAWING"));
+        assert!(panels("ELECTRONICS").is_some_and(|p| p.contains(&"CREATE") && p.contains(&"INSPECT")));
+        let draw = ids("DRAWING", "CREATE");
+        assert_eq!(draw.first().copied(), Some("drawing.create"), "{draw:?}");
+        assert!(draw.contains(&"drawing.base_view") && draw.contains(&"drawing.export_svg"), "{draw:?}");
+        let bom = ids("DRAWING", "MODIFY");
+        assert!(bom.contains(&"drawing.parts_list") && bom.contains(&"drawing.balloon"), "{bom:?}");
+        let ecreate = ids("ELECTRONICS", "CREATE");
+        assert_eq!(ecreate.first().copied(), Some("ecad.schematic"), "{ecreate:?}");
+        assert!(ecreate.contains(&"ecad.push_3d") && ecreate.contains(&"ecad.export"), "{ecreate:?}");
+        assert!(ids("ELECTRONICS", "INSPECT").contains(&"ecad.drc"));
+        assert_eq!(tabs_for_workspace("DESIGN"), tabs_for_workspace("unknown"));
     }
 }

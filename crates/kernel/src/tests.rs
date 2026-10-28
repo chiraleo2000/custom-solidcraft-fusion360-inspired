@@ -467,6 +467,11 @@ fn tapered_extrudes() {
     assert!(rel(m.volume, v) < 5e-4, "{} vs {v}", m.volume);
     assert!(m.bbox.max.z < 1e-6 && m.bbox.min.z > -10.0 - 1e-6, "{:?}", m.bbox);
     assert!(extrude_tapered(&Plane::XY, &c, 10.0, 1.0, -60f64.to_radians()).is_err(), "closes the profile");
+    // Symmetric taper on a circle: both caps need the mixed-orientation close (Pillar case).
+    let b = extrude_tapered_both(&Plane::XY, &c, 6.0, 6.0, 8f64.to_radians()).unwrap();
+    let m = measure(&b).unwrap();
+    let plain = PI * 100.0 * 12.0;
+    assert!(m.volume.is_finite() && m.volume > plain, "{} vs {plain}", m.volume);
 }
 
 #[test]

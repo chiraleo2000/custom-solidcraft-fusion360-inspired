@@ -20,7 +20,7 @@ pub struct ShortcutBox {
     /// Where it opened (the cursor), while open.
     at: Option<Pos2>,
     /// The highlighted row.
-    index: usize,
+    pub index: usize,
     /// What is typed.
     pub text: String,
     /// Most recent first.
@@ -95,14 +95,16 @@ pub fn score(q: &str, s: &str) -> u32 {
 }
 
 /// Commands matching `q`, best first: (id, label, icon, where it lives on the toolbar). With an
-/// empty query, recent commands come first, then everything by name.
+/// empty query, recent commands come first, then everything by name. Synonyms from the locale
+/// catalog count as a slightly weaker match than the command label.
 pub fn search(app: &SolveApp, q: &str) -> Vec<(&'static str, &'static str, &'static str, String)> {
     let q = q.trim().to_lowercase();
     let mut v: Vec<(u32, &'static str, &'static str, &'static str, String)> = command_specs()
         .into_iter()
         .filter_map(|c| {
             let place = if c.tab.is_empty() { String::new() } else { format!("{} › {}", c.tab, c.panel) };
-            let s = score(&q, c.label).max(score(&q, c.id) * 9 / 10).max(score(&q, c.tab) / 3).max(score(&q, c.panel) / 3);
+            let syn = crate::palette::synonyms_of(c.id).into_iter().map(|term| score(&q, &term)).max().unwrap_or(0);
+            let s = score(&q, c.label).max(score(&q, c.id) * 9 / 10).max(score(&q, c.tab) / 3).max(score(&q, c.panel) / 3).max(syn * 8 / 10);
             let recent = app.sbox.recent.iter().position(|r| r == c.id).map_or(0, |i| 2000 - i as u32);
             // Commands that can run now come before those that can't.
             let usable = if c.info(&app.session).enabled { 150 } else { 0 };
@@ -292,5 +294,14 @@ mod tests {
         let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
         other.sbox.load(&app.sbox.prefs());
         assert_eq!((other.sbox.pinned.clone(), other.sbox.recent.len()), (vec!["solid.extrude".to_string()], 2));
+    }
+
+    #[test]
+    fn search_finds_commands_by_locale_synonym() {
+        let app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        let cases = [("push pull", "solid.press_pull"), ("paint", "appearance.assign"), ("round", "solid.fillet"), ("hollow", "solid.shell")];
+        for (q, id) in cases {
+            assert!(search(&app, q).iter().any(|x| x.0 == id), "{q} should find {id}");
+        }
     }
 }

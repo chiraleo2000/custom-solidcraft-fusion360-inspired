@@ -59,50 +59,50 @@ Still deferred: PCB autorouting and a cloud renderer.
 
 ### Stage 1A — Surface workspace depth (Requirement 3 · design §1A)
 
-- [ ] 1. Deepen surface create-as-surface fidelity
-  - [ ] 1.1 Add `open_sweep` kernel helper for true open surface bodies
+- [x] 1. Deepen surface create-as-surface fidelity
+  - [x] 1.1 Add `open_sweep` kernel helper for true open surface bodies
     - Add `pub fn open_sweep(profile, ...) -> Result<Body>` in `crates/kernel/src/surfaces.rs`
       next to `surface_body`, producing a zero-thickness open body (open profiles allowed, no
       implicit cap); route the `truck` work through `solidcraft_kernel::guard("surface.open_sweep", …)`
     - _Requirements: 3.1, 3.7 · design §1A.1_
-  - [ ] 1.2 Drive `surface.extrude/revolve/sweep/loft` through the open-body path
+  - [x] 1.2 Drive `surface.extrude/revolve/sweep/loft` through the open-body path
     - In `crates/engine/src/cmd/surface.rs`, make surface-create produce a first-class open body
       via the existing `operation`/`extent` fields instead of running the solid command and
       discarding caps via `SheetWalls`; keep the command ids unchanged
     - _Requirements: 3.1 · design §1A.1_
-  - [ ]* 1.3 Property test: surface-create yields a surface + one timeline feature
+  - [x]* 1.3 Property test: surface-create yields a surface + one timeline feature
     - **Property 3: Surface-create yields a zero-thickness surface and one timeline feature**
     - **Validates: Requirements 3.1** (≥100 inputs; generate valid closed profiles)
-  - [ ]* 1.4 Oracle case: thickened-surface volume = area × thickness (analytic)
+  - [x]* 1.4 Oracle case: thickened-surface volume = area × thickness (analytic)
     - Add `tests/oracle/surface_thicken_volume/` with `recipe.json` + analytic `expected.json`;
       wire into `cargo xtask oracle`
     - _Requirements: 3.5 · design testing strategy_
 
-- [ ] 2. Deepen patch, trim/untrim, stitch, thicken
-  - [ ] 2.1 Deepen `surface.patch` boundary handling
+- [x] 2. Deepen patch, trim/untrim, stitch, thicken
+  - [x] 2.1 Deepen `surface.patch` boundary handling
     - In `crates/engine/src/cmd/surface.rs` + `crates/kernel/src/surfaces.rs`, accept mixed
       edge+sketch boundaries and guide curves for one smooth B-spline face; no new id
     - _Requirements: 3.2 · design §1A.2_
-  - [ ] 2.2 Deepen `surface.trim` to accept surface/curve tools
+  - [x] 2.2 Deepen `surface.trim` to accept surface/curve tools
     - Extend `surface.trim` in `crates/engine/src/cmd/surface.rs` to accept a surface/curve tool in
       addition to a plane, preserving `keep` semantics; keep `surface.untrim` restoring the latest
       `SurfaceTrim`
     - _Requirements: 3.3 · design §1A.3_
-  - [ ] 2.3 Deepen tolerant stitch with gap reporting
+  - [x] 2.3 Deepen tolerant stitch with gap reporting
     - Add/deepen `stitch_tolerant(bodies, tol) -> Result<Stitched>` in `crates/kernel/src/sew.rs`
       (solid when faces close, else joined surface) and report the gap edges that prevented closure;
       surface by it in `surface.stitch`
     - _Requirements: 3.4 · design §1A.4_
-  - [ ] 2.4 Deepen `surface.thicken` to multi-body / non-planar
+  - [x] 2.4 Deepen `surface.thicken` to multi-body / non-planar
     - Extend thicken in `crates/engine/src/cmd/surface.rs` + `crates/kernel/src/offset.rs` to
       multi-body and non-planar surfaces (symmetric/signed, new/join/cut/intersect)
     - _Requirements: 3.5 · design §1A.5_
-  - [ ]* 2.5 Property tests for patch/trim/stitch/thicken
+  - [x]* 2.5 Property tests for patch/trim/stitch/thicken
     - **Property 4: Planar patch area equals the enclosed area** — **Validates: 3.2**
     - **Property 5: Trim then untrim restores the surface** — **Validates: 3.3**
     - **Property 6: Stitch closes to a solid exactly when faces bound a volume** — **Validates: 3.4**
     - **Property 7: Thicken volume equals area times thickness** — **Validates: 3.5** (each ≥100 inputs)
-  - [ ]* 2.6 Oracle cases: patch area (shoelace), stitched-solid volume, extend existing unit tests
+  - [x]* 2.6 Oracle cases: patch area (shoelace), stitched-solid volume, extend existing unit tests
     - Add analytic oracle cases; extend co-located `patch_trim_thicken_and_stitch` /
       `untrim_drops_the_latest_trim` unit tests in `crates/engine/src/cmd/surface.rs`
     - _Requirements: 3.2, 3.3, 3.4_
@@ -118,12 +118,12 @@ Still deferred: PCB autorouting and a cloud renderer.
       (`.at("SURFACE", "CREATE")`, code-drawn icon in `crates/ui-egui/src/icons.rs`); add
       `FeatureKind::SurfaceRule`; unsupported configs return `bad(cmd, "not supported yet: …")`
     - _Requirements: 3.1, 3.6 · design §1A.6_
-  - [ ]* 3.3 Unit + hostile-param fuzz for new surface commands
+  - [x]* 3.3 Unit + hostile-param fuzz for new surface commands
     - Co-located unit tests; extend `hostile_params_never_panic` discipline for `surface.offset`/`.rule`
     - **Property 1: Hostile input never crashes and leaves the design unchanged** — **Validates: 3.7**
     - **Property 2: Unsupported options are reported, not performed** — **Validates: 3.6** (≥100 inputs)
 
-- [ ] 4. Checkpoint — surface depth green
+- [x] 4. Checkpoint — surface depth green
   - Ensure all tests pass (`cargo xtask ci`); capture before/after control-channel screenshots of a
     surface create + thicken (`ui.screenshot`); ask the user if questions arise.
 
@@ -360,15 +360,19 @@ Still deferred: PCB autorouting and a cloud renderer.
 
 ### Stage 5 — Render (PBR) & Animation (Requirements 10, 11 · design Stage 5) · later-phase
 
-- [ ]* 20. PBR render path and animation storyboard
-  - [ ]* 20.1 PBR appearances (reuse appearance targeting) + image output
+- [x]* 20. PBR render path and animation storyboard
+  - [x]* 20.1 PBR appearances (reuse appearance targeting) + image output
     - PBR path in `crates/render`; reuse `crates/doc/src/appearance.rs`; image file via `crates/io`;
       SolidCraft-original/openly-licensed materials with `ATTRIBUTION.md` rows; missing asset falls back
+    - Local quality presets (`draft`/`standard`/`high`) + width/height caps; scene lighting via
+      `render.environment`; procedural studios only (no HDRI). Cloud render refused.
+    - Recipes: `wf_day28_render` in `present_tests.rs`
     - _Requirements: 10.1, 10.2, 10.3, 10.4 · design Stage 5_
-  - [ ]* 20.2 Storyboard reusing motion-study/exploded-view + video/image-sequence export
+  - [x]* 20.2 Storyboard reusing motion-study/exploded-view + video/image-sequence export
     - Keyed poses + auto-explode in `crates/doc` (`motion`); publish via `crates/io`; never alter real placements
+    - PNG / image sequence only; video containers refused. Recipe: `wf_day30_anim`
     - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5 · design Stage 5_
-  - [ ]* 20.3 Property: geometry/placements unchanged, interpolation reproduces keyed poses
+  - [x]* 20.3 Property: geometry/placements unchanged, interpolation reproduces keyed poses
     - **Property 24 (later-phase)** — **Validates: 10.3, 11.2, 11.3**
 
 ### Stage 6 — Electronics / PCB (Requirement 12 · design Stage 6) · later-phase

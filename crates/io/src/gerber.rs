@@ -1,9 +1,9 @@
 //! Gerber RS-274X subset, written from the public Ucamco Gerber Layer Format specification.
 //!
 //! One file is a board outline plus one copper layer, in millimetres: coordinate format 4.6,
-//! absolute notation, linear draws and circular apertures. Arcs, regions, step-and-repeat and
-//! clear polarity are refused. PCB autorouting stays deferred; this module only reads and writes
-//! copper the caller already placed.
+//! absolute notation, linear draws, circular arcs (G02/G03), circular apertures, and filled
+//! regions (G36/G37). Step-and-repeat and clear polarity stay refused. PCB autorouting stays
+//! deferred; this module only reads and writes copper the caller already placed.
 
 use std::collections::BTreeMap;
 
@@ -14,8 +14,13 @@ const MAX_GERBER_BYTES: usize = 8 << 20;
 const MAX_RECORDS: usize = 100_000;
 /// Copper segments in one file.
 pub const MAX_GERBER_TRACES: usize = 4096;
+/// Filled copper regions in one file.
+pub const MAX_GERBER_REGIONS: usize = 256;
+/// Vertices in one filled region.
+pub const MAX_REGION_POINTS: usize = 256;
 
-/// One copper draw, millimetres.
+/// One copper draw, millimetres. When `i`/`j` are set the segment is a circular arc whose centre
+/// is offset from the start by those amounts (standard RS-274X I/J).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GerberTrace {
     pub x0: f64,
@@ -23,6 +28,29 @@ pub struct GerberTrace {
     pub x1: f64,
     pub y1: f64,
     pub width: f64,
+    /// Arc centre offset from `(x0, y0)`, millimetres. `None` = linear draw.
+    pub i: Option<f64>,
+    pub j: Option<f64>,
+    /// Clockwise when the segment is an arc (G02). Ignored for linear draws.
+    pub clockwise: bool,
+}
+
+impl GerberTrace {
+    /// A linear copper segment.
+    pub fn linear(x0: f64, y0: f64, x1: f64, y1: f64, width: f64) -> Self {
+        Self { x0, y0, x1, y1, width, i: None, j: None, clockwise: false }
+    }
+
+    pub fn is_arc(&self) -> bool {
+        self.i.is_some() || self.j.is_some()
+    }
+}
+
+/// A filled copper polygon (G36/G37 region), millimetres. The first point is repeated at the end
+/// when written.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GerberRegion {
+    pub points: Vec<[f64; 2]>,
 }
 
 /// Board outline and one copper layer, millimetres.
@@ -31,6 +59,17 @@ pub struct GerberLayer {
     pub width: f64,
     pub height: f64,
     pub traces: Vec<GerberTrace>,
+    /// Filled copper regions on this layer.
+    pub regions: Vec<GerberRegion>,
+    /// 1-based copper layer index written as a FileFunction attribute. Zero means omit it.
+    pub layer_index: u32,
+}
+
+impl GerberLayer {
+    /// Outline plus linear copper, no regions, no FileFunction index.
+    pub fn simple(width: f64, height: f64, traces: Vec<GerberTrace>) -> Self {
+        Self { width, height, traces, regions: Vec::new(), layer_index: 0 }
+    }
 }
 
 /// Write a board as a Gerber RS-274X subset (millimetres, format 4.6, one copper layer).
@@ -41,6 +80,9 @@ pub fn write_gerber(layer: &GerberLayer) -> Result<String> {
     if layer.traces.len() > MAX_GERBER_TRACES {
         return Err(IoError::Invalid("too many traces".into()));
     }
+    if layer.regions.len() > MAX_GERBER_REGIONS {
+        return Err(IoError::Invalid("too many Gerber regions".into()));
+    }
     let mut widths = Vec::new();
     for trace in &layer.traces {
         check_trace(trace)?;
@@ -48,12 +90,24 @@ pub fn write_gerber(layer: &GerberLayer) -> Result<String> {
             widths.push(trace.width);
         }
     }
+    for region in &layer.regions {
+        check_region(region)?;
+    }
     if widths.len() > 900 {
         return Err(IoError::Invalid("too many trace widths".into()));
     }
     let mut text = String::new();
     text.push_str("G04 SolidCraft Gerber subset of the Ucamco Gerber Layer Format.*\n");
     text.push_str("G04 PCB autorouting is not supported yet.*\n");
+    if layer.layer_index > 0 {
+        let side = match layer.layer_index {
+            1 => "Top",
+            2 => "Bot",
+            _ => "Inr",
+        };
+        text.push_str(&format!("%TF.FileFunction,Copper,L{},{}*%\n", layer.layer_index, side));
+        text.push_str("%TF.FilePolarity,Positive*%\n");
+    }
     text.push_str("%FSLAX46Y46*%\n");
     text.push_str("%MOMM*%\n");
     text.push_str("%ADD10C,0.100000*%\n");
@@ -89,7 +143,35 @@ pub fn write_gerber(layer: &GerberLayer) -> Result<String> {
             current = Some(code);
         }
         push_draw(&mut text, trace.x0, trace.y0, 2)?;
-        push_draw(&mut text, trace.x1, trace.y1, 1)?;
+        if trace.is_arc() {
+            let i = trace.i.unwrap_or(0.0);
+            let j = trace.j.unwrap_or(0.0);
+            let g = if trace.clockwise { "G02" } else { "G03" };
+            let xi = gerber_int(trace.x1)?;
+            let yi = gerber_int(trace.y1)?;
+            let ii = gerber_int(i)?;
+            let ji = gerber_int(j)?;
+            text.push_str(&format!("{g}X{xi}Y{yi}I{ii}J{ji}D01*\n"));
+            text.push_str("G01*\n");
+        } else {
+            push_draw(&mut text, trace.x1, trace.y1, 1)?;
+        }
+    }
+    for region in &layer.regions {
+        text.push_str("G36*\n");
+        let Some(first) = region.points.first() else {
+            return Err(IoError::Invalid("a Gerber region is empty".into()));
+        };
+        push_draw(&mut text, first[0], first[1], 2)?;
+        for point in region.points.iter().skip(1) {
+            push_draw(&mut text, point[0], point[1], 1)?;
+        }
+        // Close the contour back to the first point when the caller did not.
+        let last = region.points.last().copied().unwrap_or(*first);
+        if (last[0] - first[0]).abs() > 1e-9 || (last[1] - first[1]).abs() > 1e-9 {
+            push_draw(&mut text, first[0], first[1], 1)?;
+        }
+        text.push_str("G37*\n");
     }
     text.push_str("M02*\n");
     Ok(text)
@@ -115,12 +197,18 @@ pub fn read_gerber(text: &str) -> Result<GerberLayer> {
             max_x = max_x.max(trace.x0).max(trace.x1);
             max_y = max_y.max(trace.y0).max(trace.y1);
         }
+        for region in &plot.regions {
+            for point in &region.points {
+                max_x = max_x.max(point[0]);
+                max_y = max_y.max(point[1]);
+            }
+        }
         (max_x, max_y)
     };
     if !usable_size(width) || !usable_size(height) {
         return Err(IoError::Invalid("the Gerber file has no board outline".into()));
     }
-    Ok(GerberLayer { width, height, traces: plot.traces })
+    Ok(GerberLayer { width, height, traces: plot.traces, regions: plot.regions, layer_index: plot.layer_index })
 }
 
 fn usable_size(mm: f64) -> bool {
@@ -134,6 +222,23 @@ fn check_trace(trace: &GerberTrace) -> Result<()> {
     }
     if nums[..4].iter().any(|n| n.abs() >= 10_000.0) {
         return Err(IoError::Invalid("a Gerber coordinate does not fit format 4.6".into()));
+    }
+    for offset in [trace.i, trace.j].into_iter().flatten() {
+        if !offset.is_finite() || offset.abs() >= 10_000.0 {
+            return Err(IoError::Invalid("a Gerber arc offset does not fit format 4.6".into()));
+        }
+    }
+    Ok(())
+}
+
+fn check_region(region: &GerberRegion) -> Result<()> {
+    if region.points.len() < 3 || region.points.len() > MAX_REGION_POINTS {
+        return Err(IoError::Invalid("a Gerber region needs 3…256 points".into()));
+    }
+    for point in &region.points {
+        if !point[0].is_finite() || !point[1].is_finite() || point[0].abs() >= 10_000.0 || point[1].abs() >= 10_000.0 {
+            return Err(IoError::Invalid("a Gerber region point is out of range".into()));
+        }
     }
     Ok(())
 }
@@ -229,6 +334,10 @@ struct Plot {
     max_x: f64,
     max_y: f64,
     traces: Vec<GerberTrace>,
+    regions: Vec<GerberRegion>,
+    region: Option<Vec<[f64; 2]>>,
+    arc_mode: Option<bool>,
+    layer_index: u32,
     ended: bool,
 }
 
@@ -248,6 +357,10 @@ impl Default for Plot {
             max_x: 0.0,
             max_y: 0.0,
             traces: Vec::new(),
+            regions: Vec::new(),
+            region: None,
+            arc_mode: None,
+            layer_index: 0,
             ended: false,
         }
     }
@@ -285,11 +398,38 @@ impl Plot {
     }
 
     fn mode_g(&mut self, upper: &str) -> Result<()> {
-        if upper.starts_with("G36") || upper.starts_with("G37") {
-            return Err(IoError::Invalid("not supported yet: Gerber regions".into()));
+        if upper.starts_with("G36") {
+            if self.region.is_some() {
+                return Err(IoError::Invalid("a Gerber region is already open".into()));
+            }
+            if self.regions.len() >= MAX_GERBER_REGIONS {
+                return Err(IoError::Invalid("too many Gerber regions".into()));
+            }
+            self.copper = true;
+            self.region = Some(Vec::new());
+            return Ok(());
         }
-        if upper.starts_with("G02") || upper.starts_with("G03") {
-            return Err(IoError::Invalid("not supported yet: Gerber arcs".into()));
+        if upper.starts_with("G37") {
+            let Some(points) = self.region.take() else {
+                return Err(IoError::Invalid("G37 without an open Gerber region".into()));
+            };
+            if points.len() < 3 {
+                return Err(IoError::Invalid("a Gerber region needs 3…256 points".into()));
+            }
+            self.regions.push(GerberRegion { points });
+            return Ok(());
+        }
+        if upper.starts_with("G02") {
+            self.arc_mode = Some(true);
+            return Ok(());
+        }
+        if upper.starts_with("G03") {
+            self.arc_mode = Some(false);
+            return Ok(());
+        }
+        if upper.starts_with("G01") {
+            self.arc_mode = None;
+            return Ok(());
         }
         if upper.starts_with("G70") {
             self.unit = 25.4;
@@ -328,6 +468,10 @@ impl Plot {
             self.apertures.insert(code, diameter * self.unit);
             return Ok(());
         }
+        if tag.starts_with("TF.FILEFUNCTION") {
+            self.layer_index = parse_file_function(body);
+            return Ok(());
+        }
         if tag.starts_with("TF") || tag.starts_with("TA") || tag.starts_with("TD") || tag.starts_with("TO") || tag.starts_with("LPD") {
             return Ok(());
         }
@@ -339,13 +483,13 @@ impl Plot {
 
     fn plot(&mut self, record: &str) -> Result<()> {
         let drawn = parse_plot(record, self.integer_digits, self.decimals)?;
-        if drawn.arc {
-            return Err(IoError::Invalid("not supported yet: Gerber arcs".into()));
-        }
         let x = drawn.x.map(|n| n * self.unit).unwrap_or(self.x);
         let y = drawn.y.map(|n| n * self.unit).unwrap_or(self.y);
         if !x.is_finite() || !y.is_finite() || x.abs() >= 10_000.0 || y.abs() >= 10_000.0 {
             return Err(IoError::Invalid("a Gerber coordinate is out of range".into()));
+        }
+        if self.region.is_some() {
+            return self.plot_region(x, y, drawn.d);
         }
         let Some(code) = drawn.d else {
             self.x = x;
@@ -361,17 +505,66 @@ impl Plot {
                 self.x = x;
                 self.y = y;
             }
-            1 => self.draw(x, y)?,
+            1 => self.draw(x, y, drawn.i.map(|n| n * self.unit), drawn.j.map(|n| n * self.unit), drawn.arc.or(self.arc_mode))?,
             3 => self.flash(x, y)?,
             _ => return Err(IoError::Invalid(format!("unsupported Gerber D{code}"))),
         }
         Ok(())
     }
 
-    fn draw(&mut self, x: f64, y: f64) -> Result<()> {
+    fn plot_region(&mut self, x: f64, y: f64, d: Option<u32>) -> Result<()> {
+        match d {
+            None | Some(2) => {
+                let points = self.region.as_mut().ok_or_else(|| IoError::Invalid("G37 without an open Gerber region".into()))?;
+                if points.len() >= MAX_REGION_POINTS {
+                    return Err(IoError::Invalid("a Gerber region needs 3…256 points".into()));
+                }
+                if points.last().is_none_or(|p| (p[0] - x).abs() > 1e-12 || (p[1] - y).abs() > 1e-12) {
+                    points.push([x, y]);
+                }
+                self.x = x;
+                self.y = y;
+            }
+            Some(1) => {
+                let start = [self.x, self.y];
+                let points = self.region.as_mut().ok_or_else(|| IoError::Invalid("G37 without an open Gerber region".into()))?;
+                if points.is_empty() {
+                    points.push(start);
+                }
+                if points.len() >= MAX_REGION_POINTS {
+                    return Err(IoError::Invalid("a Gerber region needs 3…256 points".into()));
+                }
+                points.push([x, y]);
+                self.x = x;
+                self.y = y;
+            }
+            Some(3) => return Err(IoError::Invalid("a flash is not valid inside a Gerber region".into())),
+            Some(code) if code >= 10 => {
+                self.aperture = Some(*self.apertures.get(&code).ok_or_else(|| IoError::Invalid(format!("unknown aperture D{code}")))?);
+            }
+            Some(code) => return Err(IoError::Invalid(format!("unsupported Gerber D{code}"))),
+        }
+        Ok(())
+    }
+
+    fn draw(&mut self, x: f64, y: f64, i: Option<f64>, j: Option<f64>, clockwise: Option<bool>) -> Result<()> {
         let width = self.aperture.ok_or_else(|| IoError::Invalid("no aperture selected".into()))?;
         if self.copper {
-            self.push_trace(self.x, self.y, x, y, width)?;
+            let arc = i.is_some() || j.is_some() || clockwise.is_some();
+            if arc {
+                self.push_trace(GerberTrace {
+                    x0: self.x,
+                    y0: self.y,
+                    x1: x,
+                    y1: y,
+                    width,
+                    i: Some(i.unwrap_or(0.0)),
+                    j: Some(j.unwrap_or(0.0)),
+                    clockwise: clockwise.unwrap_or(true),
+                })?;
+            } else {
+                self.push_trace(GerberTrace::linear(self.x, self.y, x, y, width))?;
+            }
         } else {
             self.max_x = self.max_x.max(self.x).max(x);
             self.max_y = self.max_y.max(self.y).max(y);
@@ -385,18 +578,19 @@ impl Plot {
     fn flash(&mut self, x: f64, y: f64) -> Result<()> {
         let width = self.aperture.ok_or_else(|| IoError::Invalid("no aperture selected".into()))?;
         if self.copper {
-            self.push_trace(x, y, x, y, width)?;
+            self.push_trace(GerberTrace::linear(x, y, x, y, width))?;
         }
         self.x = x;
         self.y = y;
         Ok(())
     }
 
-    fn push_trace(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, width: f64) -> Result<()> {
+    fn push_trace(&mut self, trace: GerberTrace) -> Result<()> {
         if self.traces.len() >= MAX_GERBER_TRACES {
             return Err(IoError::Invalid("too many traces".into()));
         }
-        self.traces.push(GerberTrace { x0, y0, x1, y1, width });
+        check_trace(&trace)?;
+        self.traces.push(trace);
         Ok(())
     }
 }
@@ -405,7 +599,9 @@ struct Drawn {
     x: Option<f64>,
     y: Option<f64>,
     d: Option<u32>,
-    arc: bool,
+    i: Option<f64>,
+    j: Option<f64>,
+    arc: Option<bool>,
 }
 
 fn parse_fs(body: &str) -> Result<(u32, u32)> {
@@ -437,6 +633,19 @@ fn parse_fs(body: &str) -> Result<(u32, u32)> {
         return Err(IoError::Invalid("the Gerber format is not a supported X/Y pair".into()));
     }
     Ok((xi, xd))
+}
+
+fn parse_file_function(body: &str) -> u32 {
+    let upper = body.to_ascii_uppercase();
+    // %TF.FileFunction,Copper,L1,Top*% → layer 1
+    let Some(rest) = upper.split(',').nth(2) else {
+        return 0;
+    };
+    let digits: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();
+    match digits.parse::<u32>() {
+        Ok(n) if n > 0 && n < 100 => n,
+        _ => 0,
+    }
 }
 
 fn byte(bytes: &[u8], index: usize) -> Result<u8> {
@@ -480,7 +689,7 @@ fn take_digits(text: &str) -> Result<(&str, &str)> {
 fn parse_plot(record: &str, integer_digits: u32, decimals: u32) -> Result<Drawn> {
     let bytes = record.as_bytes();
     let mut index = 0;
-    let mut drawn = Drawn { x: None, y: None, d: None, arc: false };
+    let mut drawn = Drawn { x: None, y: None, d: None, i: None, j: None, arc: None };
     while index < bytes.len() {
         let word = byte(bytes, index)?.to_ascii_uppercase();
         index += 1;
@@ -502,11 +711,13 @@ fn parse_plot(record: &str, integer_digits: u32, decimals: u32) -> Result<Drawn>
                     }
                 }
                 let token = record.get(start..index).ok_or_else(|| IoError::Invalid("bad coordinate".into()))?;
-                if word == b'I' || word == b'J' {
-                    drawn.arc = true;
-                } else {
-                    let value = parse_coord(token, integer_digits, decimals, dotted)?;
-                    if word == b'X' { drawn.x = Some(value) } else { drawn.y = Some(value) }
+                let value = parse_coord(token, integer_digits, decimals, dotted)?;
+                match word {
+                    b'X' => drawn.x = Some(value),
+                    b'Y' => drawn.y = Some(value),
+                    b'I' => drawn.i = Some(value),
+                    b'J' => drawn.j = Some(value),
+                    _ => {}
                 }
             }
             b'D' | b'G' => {
@@ -516,8 +727,12 @@ fn parse_plot(record: &str, integer_digits: u32, decimals: u32) -> Result<Drawn>
                 }
                 let token = record.get(start..index).filter(|token| !token.is_empty()).ok_or_else(|| IoError::Invalid("bad D code".into()))?;
                 if word == b'G' {
-                    if token == "02" || token == "03" {
-                        drawn.arc = true;
+                    if token == "02" {
+                        drawn.arc = Some(true);
+                    } else if token == "03" {
+                        drawn.arc = Some(false);
+                    } else if token == "01" {
+                        drawn.arc = None;
                     }
                 } else {
                     let code: u32 = token.parse().map_err(|_| IoError::Invalid("bad D code".into()))?;
@@ -567,9 +782,9 @@ mod tests {
         let mut traces = Vec::new();
         for i in 0..100 {
             let y = 1.0 + i as f64 * 0.4;
-            traces.push(GerberTrace { x0: 1.0, y0: y, x1: 8.0 + (i % 3) as f64, y1: y, width: 0.15 + (i % 5) as f64 * 0.05 });
+            traces.push(GerberTrace::linear(1.0, y, 8.0 + (i % 3) as f64, y, 0.15 + (i % 5) as f64 * 0.05));
         }
-        let layer = GerberLayer { width: 30.0, height: 50.0, traces };
+        let layer = GerberLayer::simple(30.0, 50.0, traces);
         let text = write_gerber(&layer).unwrap();
         assert!(text.contains("%FSLAX46Y46*%"), "{text}");
         assert!(text.contains("%MOMM*%"), "{text}");
@@ -585,7 +800,33 @@ mod tests {
             close(got.x1, want.x1);
             close(got.y1, want.y1);
             close(got.width, want.width);
+            assert!(!got.is_arc());
         }
+    }
+
+    #[test]
+    fn arcs_regions_and_layer_function_round_trip() {
+        let layer = GerberLayer {
+            width: 20.0,
+            height: 10.0,
+            traces: vec![GerberTrace { x0: 5.0, y0: 5.0, x1: 15.0, y1: 5.0, width: 0.2, i: Some(5.0), j: Some(0.0), clockwise: false }],
+            regions: vec![GerberRegion { points: vec![[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]] }],
+            layer_index: 2,
+        };
+        let text = write_gerber(&layer).unwrap();
+        assert!(text.contains("%TF.FileFunction,Copper,L2,Bot*%"), "{text}");
+        assert!(text.contains("G03"), "{text}");
+        assert!(text.contains("G36*"), "{text}");
+        assert!(text.contains("G37*"), "{text}");
+        let back = read_gerber(&text).unwrap();
+        assert_eq!(back.layer_index, 2);
+        assert_eq!(back.traces.len(), 1);
+        assert!(back.traces[0].is_arc());
+        close(back.traces[0].i.unwrap_or(0.0), 5.0);
+        assert!(!back.traces[0].clockwise);
+        assert_eq!(back.regions.len(), 1);
+        assert_eq!(back.regions[0].points.len(), 5); // closed
+        close(back.regions[0].points[0][0], 1.0);
     }
 
     #[test]
@@ -607,13 +848,13 @@ M02*
         close(layer.traces[0].width, 0.254);
         close(layer.traces[1].x0, 25.4);
         close(layer.traces[1].y1, 50.8);
-        let arc = read_gerber("%FSLAX46Y46*%\n%MOMM*%\nG02*\nM02*\n").unwrap_err();
-        assert!(arc.to_string().contains("not supported yet"), "{arc}");
         assert!(read_gerber("").is_err());
         assert!(read_gerber("hello").is_err());
         let huge = "X0Y0D01*".repeat(MAX_RECORDS + 1);
         assert!(read_gerber(&huge).unwrap_err().to_string().contains("too many"));
         let clear = read_gerber("%FSLAX46Y46*%\n%MOMM*%\n%LPC*%\nM02*\n").unwrap_err();
         assert!(clear.to_string().contains("not supported yet"), "{clear}");
+        let trailing = read_gerber("%FSTAX46Y46*%\n%MOMM*%\nM02*\n").unwrap_err();
+        assert!(trailing.to_string().contains("not supported yet"), "{trailing}");
     }
 }

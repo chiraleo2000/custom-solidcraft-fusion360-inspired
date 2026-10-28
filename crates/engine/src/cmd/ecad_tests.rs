@@ -271,9 +271,11 @@ fn push_3d_makes_an_assembly_component_and_exports_gerber() {
     let again = run(&mut s, "ecad.push_3d", json!({}));
     assert_eq!(again["unchanged"], true, "{again}");
     assert_eq!(s.doc.features.len(), features);
-    let err = s.execute("ecad.push_3d", &json!({"thickness": 2.0})).unwrap_err();
-    assert!(err.to_string().contains("not supported yet"), "{err}");
-    assert_eq!(s.doc.features.len(), features);
+    let updated = run(&mut s, "ecad.push_3d", json!({"thickness": 2.0}));
+    assert_eq!(updated["updated"], true, "{updated}");
+    assert_eq!(s.active_component, 0);
+    assert!(rel(body_volume(&mut s, "PCB"), 30.0 * 20.0 * 2.0) < 1e-4);
+    assert!(rel(body_volume(&mut s, "Lid"), 1000.0) < 1e-4);
     let before = s.doc.to_json();
     let err = s.execute("ecad.push_3d", &json!({"autoroute": true})).unwrap_err();
     assert!(err.to_string().contains("not supported yet"), "{err}");
@@ -296,4 +298,104 @@ fn push_3d_makes_an_assembly_component_and_exports_gerber() {
     assert_eq!(trace.net, "vcc");
     assert!((trace.width - 0.25).abs() < 1e-9);
     assert_eq!(loaded.schematic.as_ref().and_then(|sc| sc.components.first()).map(|part| part.refdes.as_str()), Some("U1"));
+}
+
+#[test]
+fn multi_layer_copper_drc_erc_and_gerber_stay_read_only() {
+    let mut s = Session::default();
+    run(&mut s, "ecad.schematic", json!({"parts": [{"refdes": "U1", "pins": ["1", "2"]}], "nets": [{"name": "VCC", "nodes": ["VCC"]}]}));
+    let before = s.doc.to_json();
+    let erc = run(&mut s, "ecad.erc", json!({}));
+    assert_eq!(erc["dangling"].as_u64(), Some(1), "{erc}");
+    assert_eq!(erc["undriven"].as_u64(), Some(1), "{erc}");
+    assert_eq!(erc["open_pins"].as_u64(), Some(2), "{erc}");
+    assert_eq!(s.doc.to_json(), before);
+
+    run(&mut s, "ecad.board", json!({"width": 40, "height": 30, "layers": 2}));
+    run(&mut s, "ecad.trace", json!({"x0": 5, "y0": 5, "x1": 20, "y1": 5, "width": 0.2, "net": "a", "layer": "top"}));
+    run(&mut s, "ecad.trace", json!({"x0": 5, "y0": 5.1, "x1": 20, "y1": 5.1, "width": 0.2, "net": "b", "layer": "bottom"}));
+    run(&mut s, "ecad.trace", json!({"x0": 0.05, "y0": 15, "x1": 5, "y1": 15, "width": 0.2, "net": "edge", "layer": 1}));
+    let before = s.doc.to_json();
+    let same_plane = run(&mut s, "ecad.drc", json!({"clearance": 0.2, "min_width": 0.15}));
+    assert_eq!(same_plane["clearance"].as_u64(), Some(0), "{same_plane}");
+    let edged = run(&mut s, "ecad.drc", json!({"clearance": 0.2, "edge": 0.5}));
+    assert!(edged["edge"].as_u64().unwrap_or(0) >= 1, "{edged}");
+    assert_eq!(s.doc.to_json(), before);
+    assert_eq!(s.doc.board.as_ref().map(|b| b.layers), Some(2));
+
+    assert!(s.execute("ecad.trace", &json!({"x0": 1, "y0": 1, "x1": 2, "y1": 1, "width": 0.2, "layer": "inner"})).is_err());
+    assert!(s.execute("ecad.trace", &json!({"x0": 1, "y0": 1, "x1": 2, "y1": 1, "width": 0.2, "layer": 3})).is_err());
+    assert!(s.execute("ecad.board", &json!({"width": 10, "height": 10, "layer": "inner"})).is_err());
+    assert!(s.execute("ecad.export", &json!({"path": "board.gbr", "autoroute": true})).is_err());
+    assert_eq!(s.doc.to_json(), before);
+
+    let gerber = std::env::temp_dir().join(format!("solidcraft-ecad-ml-{}.gbr", std::process::id()));
+    let exported = run(&mut s, "ecad.export", json!({"path": gerber.to_string_lossy()}));
+    assert_eq!(s.doc.to_json(), before);
+    let files = exported["files"].as_array().expect("files");
+    assert_eq!(files.len(), 2, "{exported}");
+    for file in files {
+        let path = file.as_str().expect("path");
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("PCB autorouting is not supported yet"), "{text}");
+        assert!(text.contains("%TF.FileFunction,Copper,"), "{text}");
+        let layer = solidcraft_io::read_gerber(&text).unwrap();
+        assert!((layer.width - 40.0).abs() < 1e-4);
+        assert!(layer.layer_index == 1 || layer.layer_index == 2, "{layer:?}");
+    }
+    let top_only = std::env::temp_dir().join(format!("solidcraft-ecad-top-{}.gbr", std::process::id()));
+    run(&mut s, "ecad.export", json!({"path": top_only.to_string_lossy(), "layer": "top"}));
+    let top = solidcraft_io::read_gerber(&std::fs::read_to_string(&top_only).unwrap()).unwrap();
+    assert_eq!(top.layer_index, 1);
+    assert_eq!(top.traces.len(), 2, "{top:?}");
+}
+
+#[test]
+fn arcs_regions_inner_layers_and_3d_stack_export() {
+    let mut s = Session::default();
+    run(&mut s, "ecad.board", json!({"width": 50, "height": 40, "layers": 4}));
+    let arc = run(
+        &mut s,
+        "ecad.trace",
+        json!({"x0": 10, "y0": 20, "x1": 30, "y1": 20, "width": 0.25, "net": "sig", "layer": "top", "i": 10, "j": 0, "clockwise": false}),
+    );
+    assert_eq!(arc["arc"], true, "{arc}");
+    assert_eq!(arc["layer"].as_u64(), Some(1));
+    let pad = run(&mut s, "ecad.trace", json!({"points": [[2.0, 2.0], [8.0, 2.0], [8.0, 8.0], [2.0, 8.0]], "net": "gnd", "layer": "top"}));
+    assert_eq!(pad["regions"].as_u64(), Some(1), "{pad}");
+    run(&mut s, "ecad.trace", json!({"x0": 5, "y0": 30, "x1": 25, "y1": 30, "width": 0.2, "net": "inner", "layer": "inner1"}));
+    run(&mut s, "ecad.trace", json!({"x0": 5, "y0": 32, "x1": 25, "y1": 32, "width": 0.2, "net": "bot", "layer": "bottom"}));
+    assert_eq!(s.doc.board.as_ref().map(|b| b.layers), Some(4));
+    assert_eq!(s.doc.board.as_ref().map(|b| b.traces.len()), Some(3));
+    assert_eq!(s.doc.board.as_ref().map(|b| b.regions.len()), Some(1));
+    assert!(s.doc.board.as_ref().and_then(|b| b.traces.first()).is_some_and(|t| t.is_arc()));
+
+    let before = s.doc.to_json();
+    let drc = run(&mut s, "ecad.drc", json!({"clearance": 0.15, "edge": 1.0}));
+    assert!(drc["layers"].as_u64().unwrap_or(0) >= 4, "{drc}");
+    assert_eq!(s.doc.to_json(), before);
+
+    let gerber = std::env::temp_dir().join(format!("solidcraft-ecad-arc-{}.gbr", std::process::id()));
+    let exported = run(&mut s, "ecad.export", json!({"path": gerber.to_string_lossy()}));
+    assert_eq!(exported["files"].as_array().map(|f| f.len()), Some(4), "{exported}");
+    assert!(exported["regions"].as_u64().unwrap_or(0) >= 1, "{exported}");
+    assert_eq!(s.doc.to_json(), before);
+    let top_path = exported["files"].as_array().and_then(|f| f.first()).and_then(|v| v.as_str()).expect("top file");
+    let top_text = std::fs::read_to_string(top_path).unwrap();
+    assert!(top_text.contains("G03") || top_text.contains("G02"), "{top_text}");
+    assert!(top_text.contains("G36*"), "{top_text}");
+    let top = solidcraft_io::read_gerber(&top_text).unwrap();
+    assert_eq!(top.layer_index, 1);
+    assert!(top.traces.iter().any(|t| t.is_arc()), "{top:?}");
+    assert_eq!(top.regions.len(), 1, "{top:?}");
+
+    let pushed = run(&mut s, "ecad.push_3d", json!({}));
+    assert_eq!(pushed["body"], "PCB");
+    assert_eq!(pushed["layers"].as_u64(), Some(4), "{pushed}");
+    assert!(rel(body_volume(&mut s, "PCB"), 50.0 * 40.0 * 1.6) < 1e-4);
+    let again = run(&mut s, "ecad.push_3d", json!({"thickness": 1.6}));
+    assert_eq!(again["unchanged"], true, "{again}");
+    assert_eq!(again["layers"].as_u64(), Some(4), "{again}");
+    assert!(s.execute("ecad.trace", &json!({"x0": 1, "y0": 1, "x1": 2, "y1": 1, "width": 0.2, "layer": "inner3"})).is_err());
+    assert!(s.execute("ecad.trace", &json!({"points": [[0.0, 0.0], [1.0, 0.0]], "layer": 1})).is_err());
 }

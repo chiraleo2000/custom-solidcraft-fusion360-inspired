@@ -1,0 +1,327 @@
+{
+  "id": "pdf_day25_surface",
+  "day": 25,
+  "title": "Surface modeling smoke",
+  "description": "Surface extrude/revolve/sweep/loft, patch, trim, untrim, stitch, thicken.",
+  "smoke": true,
+  "commands": [
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Pad"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          0,
+          0
+        ],
+        "p1": [
+          20,
+          10
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "surface.extrude",
+      "params": {
+        "sketch": "Pad",
+        "distance": 8,
+        "body_name": "Wall"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XZ",
+        "name": "Rev"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            30,
+            0
+          ],
+          [
+            36,
+            0
+          ],
+          [
+            36,
+            8
+          ],
+          [
+            30,
+            8
+          ]
+        ],
+        "ids": [
+          "r0",
+          "r1",
+          "r2"
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "surface.revolve",
+      "params": {
+        "sketch": "Rev",
+        "axis": "Z",
+        "angle": "90 deg",
+        "body_name": "Rim"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Path"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            50,
+            0
+          ],
+          [
+            70,
+            0
+          ]
+        ],
+        "ids": [
+          "path"
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "YZ",
+        "name": "Prof"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            0,
+            0
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            4,
+            3
+          ]
+        ],
+        "ids": [
+          "p0",
+          "p1"
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "surface.sweep",
+      "params": {
+        "sketch": "Prof",
+        "path_sketch": "Path",
+        "path": [
+          "path"
+        ],
+        "body_name": "Rail"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "LoftA"
+      }
+    },
+    {
+      "command": "sketch.circle.center",
+      "params": {
+        "center": [
+          100,
+          0
+        ],
+        "radius": 6
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "construct.plane.offset",
+      "params": {
+        "base": "XY",
+        "offset": 15,
+        "name": "LoftTop"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "LoftTop",
+        "name": "LoftB"
+      }
+    },
+    {
+      "command": "sketch.circle.center",
+      "params": {
+        "center": [
+          100,
+          0
+        ],
+        "radius": 3
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "surface.loft",
+      "params": {
+        "sections": [
+          {
+            "sketch": "LoftA"
+          },
+          {
+            "sketch": "LoftB"
+          }
+        ],
+        "body_name": "Cone"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": {
+          "origin": [
+            0,
+            40,
+            0
+          ],
+          "x_dir": [
+            1,
+            0,
+            0
+          ],
+          "y_dir": [
+            0,
+            1,
+            0
+          ]
+        },
+        "name": "PatchSk"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          0,
+          0
+        ],
+        "p1": [
+          16,
+          12
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "surface.patch",
+      "params": {
+        "sketch": "PatchSk",
+        "body_name": "Sheet"
+      }
+    },
+    {
+      "command": "surface.trim",
+      "params": {
+        "body": "Sheet",
+        "plane": {
+          "origin": [
+            8,
+            0,
+            0
+          ],
+          "normal": [
+            1,
+            0,
+            0
+          ]
+        },
+        "keep": [
+          12,
+          6,
+          0
+        ]
+      }
+    },
+    {
+      "command": "surface.untrim",
+      "params": {
+        "body": "Sheet"
+      }
+    },
+    {
+      "command": "surface.stitch",
+      "params": {
+        "bodies": [
+          "Wall",
+          "Rim"
+        ],
+        "body_name": "Sewn"
+      }
+    },
+    {
+      "command": "surface.thicken",
+      "params": {
+        "bodies": [
+          "Sheet"
+        ],
+        "thickness": "1 mm",
+        "body_name": "Panel"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

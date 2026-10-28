@@ -157,6 +157,7 @@ pub enum Kind {
     Pipe {
         diameter: String,
         wall: String,
+        operation: usize,
     },
     /// A stock block around bodies.
     Stock {
@@ -388,7 +389,9 @@ impl Dialog {
                 Kind::PathPattern { count: "4".into(), spacing: "20 mm".into() },
                 vec![SelInput::new("Objects", BODIES, true), SelInput::new("Path", CURVES, true)],
             ),
-            "solid.pipe" => Dialog::new(Kind::Pipe { diameter: "5 mm".into(), wall: String::new() }, vec![SelInput::new("Path", CURVES, true)]),
+            "solid.pipe" => {
+                Dialog::new(Kind::Pipe { diameter: "5 mm".into(), wall: String::new(), operation: 0 }, vec![SelInput::new("Path", CURVES, true)])
+            }
             "solid.bounding_solid" => Dialog::new(Kind::Stock { margin: "2 mm".into() }, vec![SelInput::new("Bodies (all if none)", BODIES, true)]),
             "construct.plane.offset" => {
                 Dialog::new(Kind::OffsetPlane { offset: "10 mm".into() }, vec![SelInput::new("Plane", PLANES | PLANAR_FACES, false)])
@@ -1489,7 +1492,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             enter |= field(ui, to_offset);
                             ui.end_row();
                         }
-                        if *direction < 2 {
+                        // One-side, symmetric and two-sides all take a taper; a start offset still refuses it.
+                        if start.trim().is_empty() {
                             row_label(ui, "Taper Angle");
                             let before = taper.clone();
                             enter |= field(ui, taper);
@@ -1827,7 +1831,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             ui.end_row();
                         }
                     }
-                    Kind::Pipe { diameter, wall } => {
+                    Kind::Pipe { diameter, wall, operation } => {
                         row_label(ui, "Diameter");
                         enter |= field(ui, diameter);
                         ui.end_row();
@@ -1835,6 +1839,9 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         let r = ui.add(egui::TextEdit::singleline(wall).hint_text("solid"));
                         crate::params_dialog::complete(ui, &r, wall);
                         enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.end_row();
+                        row_label(ui, "Operation");
+                        combo(ui, "pipe_op", &OP_LABELS, operation);
                         ui.end_row();
                     }
                     Kind::Stock { margin } => {
@@ -1941,6 +1948,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             let r = ui.add(egui::TextEdit::singleline(&mut opts.thread).hint_text("M5"));
                             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                             ui.end_row();
+                            if *kind == 2 {
+                                ui.label("");
+                                ui.label(RichText::new("Tapped + Countersink: CSK Ø/angle below, tap size above.").color(t.text_dim).size(11.0));
+                                ui.end_row();
+                            }
                         }
                         if *kind == 0 {
                             row_label(ui, "Drill Point");
@@ -1998,9 +2010,14 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         row_label(ui, "New Component");
                         extra_check(ui, &mut d.extra, "new_component");
                         ui.end_row();
-                        row_label(ui, "Keep Tools");
-                        ui.checkbox(keep_tools, "");
-                        ui.end_row();
+                        // Keep Tools only applies to Cut (index 2 in OPS: new/join/cut/intersect).
+                        if *operation == 2 {
+                            row_label(ui, "Keep Tools");
+                            ui.checkbox(keep_tools, "Leave tool bodies after the cut (mold cavity)");
+                            ui.end_row();
+                        } else {
+                            *keep_tools = false;
+                        }
                     }
                     Kind::Params { new_name, new_expr } => params_table(app, ui, new_name, new_expr),
                     Kind::EditParam { name, expr } => {
@@ -2072,10 +2089,12 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 egui::Spinner::new().size(14.0).paint_at(ui, sr);
                 sresp.on_hover_text("Updating the preview");
             }
-            let raw_label = if matches!(d.kind, Kind::ConfirmDelete { .. }) { "Delete" } else { "OK" };
-            let label = tr(raw_label);
-            let raw_close = if matches!(d.kind, Kind::Params { .. } | Kind::Measure { .. }) { "Close" } else { "Cancel" };
-            let close = tr(raw_close);
+            // Stable ids so the footer stays Cancel→OK (or Close/Delete) in every locale.
+            let confirm_id = if matches!(d.kind, Kind::ConfirmDelete { .. }) { "ui.delete" } else { "ui.heading_ok" };
+            let dismiss_id = if matches!(d.kind, Kind::Params { .. } | Kind::Measure { .. }) { "ui.close" } else { "ui.cancel" };
+            let label = crate::i18n::tr(confirm_id);
+            let close = crate::i18n::tr(dismiss_id);
+            let handle_label = if matches!(d.kind, Kind::ConfirmDelete { .. }) { "Delete" } else { "OK" };
             let button_width = |text: &str| {
                 let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
                 (galley.size().x + 2.0 * ui.spacing().button_padding.x).max(64.0)
@@ -2093,7 +2112,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         .wrap_mode(egui::TextWrapMode::Extend)
                         .min_size(vec2(ok_width, 24.0));
                     let r = ui.add_enabled(valid, b);
-                    crate::scenario::publish_handle(&format!("dialog:{raw_label}"), r.rect.center());
+                    crate::scenario::publish_handle(&format!("dialog:{handle_label}"), r.rect.center());
                     if r.clicked() {
                         ok = true;
                     }
@@ -2559,7 +2578,8 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             let tapered = s.doc.eval(taper, ValueKind::Angle).map(|v| v.abs() > 1e-12).unwrap_or(!taper.trim().is_empty());
             if *direction == TWO_SIDES {
                 common["distance2"] = json!(distance2);
-            } else if *direction < 2 && (*taper_present || tapered) {
+            }
+            if start.trim().is_empty() && (*taper_present || tapered) {
                 common["taper"] = json!(taper);
             }
             if !start.trim().is_empty() {
@@ -2875,11 +2895,16 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             pattern_objects(s, sels(d, 0), &mut p);
             ("solid.pattern.path", p)
         }
-        Kind::Pipe { diameter, wall } => {
+        Kind::Pipe { diameter, wall, operation } => {
             need(0, "the path")?;
             let path = curve_ids(d, 0);
             let sketch = curves_sketch(app, &path, None).ok_or("the path curves must be in one sketch")?;
-            let mut p = json!({"path_sketch": sketch, "path": path, "diameter": diameter});
+            let mut p = json!({
+                "path_sketch": sketch,
+                "path": path,
+                "diameter": diameter,
+                "operation": OPS.get(*operation).copied().unwrap_or("new"),
+            });
             if !wall.trim().is_empty() {
                 p["wall"] = json!(wall);
             }
@@ -3837,11 +3862,10 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
         }
         FeatureKind::Pipe { path, diameter, wall, operation, targets, .. } => {
             let mut d = start("solid.pipe")?;
-            d.kind = Kind::Pipe { diameter: diameter.clone(), wall: wall.clone().unwrap_or_default() };
+            d.kind = Kind::Pipe { diameter: diameter.clone(), wall: wall.clone().unwrap_or_default(), operation: op_index(operation) };
             if let Some(inp) = d.inputs.first_mut() {
                 inp.items = path.iter().map(|id| Sel::SketchCurve { id: id.clone() }).collect();
             }
-            d.extra.insert("operation".into(), json!(OPS.get(op_index(operation)).copied().unwrap_or("new")));
             if !targets.is_empty() {
                 d.extra.insert("targets".into(), json!(targets));
             }

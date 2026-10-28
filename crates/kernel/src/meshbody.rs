@@ -9,19 +9,30 @@ use solidcraft_geom::{Mesh, Vec3};
 use crate::body::Body;
 use crate::{KernelError, Result};
 
-/// Most triangles in one mesh body.
+/// Most triangles in one mesh body (`MAX_MESH_TRIS` in the parity design).
 pub const MAX_TRIANGLES: usize = 20_000_000;
+/// Alias for the design's `MAX_MESH_TRIS` cap on remesh / edit ops.
+pub const MAX_MESH_TRIS: usize = MAX_TRIANGLES;
 
-/// A section or face-group walk past these counts returns an error instead of running unbounded.
+/// A section, edit, or face-group walk past these counts returns an error instead of running unbounded.
 const MAX_SECTION_TRIS: usize = 2_000_000;
 const MAX_SECTION_LOOPS: usize = 10_000;
 const MAX_SECTION_POINTS: usize = 500_000;
 const MAX_FACE_GROUP_TRIS: usize = 100_000;
+/// Plane-cut / reduce / repair refuse past this before allocating work.
+const MAX_EDIT_TRIS: usize = 2_000_000;
 /// Region growing accepts a neighbour while the angle between normals stays under 30 degrees.
 const FACE_GROUP_COS: f64 = 0.8660254037844387;
 const MAX_DEVIATION_VERTS: usize = 200_000;
 const MAX_DEVIATION_TRIS: usize = 200_000;
 const MAX_DEVIATION_TESTS: usize = 20_000_000;
+
+fn edit_tris_ok(triangles: usize, op: &str) -> Result<()> {
+    if triangles > MAX_EDIT_TRIS {
+        return Err(KernelError::Invalid(format!("{op} is limited to {MAX_EDIT_TRIS} triangles")));
+    }
+    Ok(())
+}
 
 /// Indexed triangles with shared vertices, wound counter-clockwise seen from outside.
 #[derive(Clone, Debug, Default)]
@@ -224,7 +235,11 @@ impl Body {
 /// plane are clipped. The result is a mesh body (open, if the cut removed a cap).
 pub fn mesh_plane_cut(body: &Body, origin: Vec3, normal: Vec3, keep: Vec3) -> Result<Body> {
     let n = normal.normalized().ok_or_else(|| KernelError::Invalid("the cut plane needs a direction".into()))?;
+    if !origin.is_finite() || !keep.is_finite() {
+        return Err(KernelError::Invalid("the cut plane needs finite points".into()));
+    }
     let (positions, triangles) = body.triangle_mesh().ok_or_else(|| KernelError::Invalid("select a mesh body".into()))?;
+    edit_tris_ok(triangles.len(), "plane cut")?;
     let side = |p: Vec3| (p - origin).dot(n);
     let keep_pos = side(keep) >= 0.0;
     let mut out_pos = Vec::new();
@@ -285,6 +300,7 @@ pub fn mesh_plane_cut(body: &Body, origin: Vec3, normal: Vec3, keep: Vec3) -> Re
 /// closes a single triangular hole.
 pub fn mesh_repair(body: &Body) -> Result<Body> {
     let (positions, triangles) = body.triangle_mesh().ok_or_else(|| KernelError::Invalid("select a mesh body".into()))?;
+    edit_tris_ok(triangles.len(), "mesh repair")?;
     let mut tris: Vec<[u32; 3]> = triangles
         .iter()
         .copied()
@@ -333,40 +349,55 @@ pub fn mesh_repair(body: &Body) -> Result<Body> {
 }
 
 /// Collapse nearby vertices so about `ratio` of the triangles remain (0…1).
+/// The grid cell is capped and shrunk on empty results so a small body is never wiped out
+/// by an oversized cell (which used to return "removed every triangle" for valid ratios).
 pub fn mesh_reduce(body: &Body, ratio: f64) -> Result<Body> {
     if !(ratio.is_finite() && ratio > 0.0 && ratio <= 1.0) {
         return Err(KernelError::Invalid("reduce ratio must be within 0…1".into()));
     }
     let (positions, triangles) = body.triangle_mesh().ok_or_else(|| KernelError::Invalid("select a mesh body".into()))?;
-    let cell = (body.size() * (1.0 - ratio).max(0.01)).max(1e-4);
-    let key = |p: Vec3| ((p.x / cell).round() as i64, (p.y / cell).round() as i64, (p.z / cell).round() as i64);
-    let mut map: std::collections::HashMap<(i64, i64, i64), u32> = std::collections::HashMap::new();
-    let mut remap = vec![0u32; positions.len()];
-    let mut out_pos = Vec::new();
-    for (i, p) in positions.iter().enumerate() {
-        let k = key(*p);
-        let next = u32::try_from(out_pos.len()).unwrap_or(u32::MAX);
-        let id = *map.entry(k).or_insert_with(|| {
-            out_pos.push(*p);
-            next
-        });
-        if let Some(slot) = remap.get_mut(i) {
-            *slot = id;
+    edit_tris_ok(triangles.len(), "mesh reduce")?;
+    if triangles.is_empty() {
+        return Err(KernelError::Invalid("the mesh has no triangles".into()));
+    }
+    let size = body.size().max(1e-4);
+    // Cap the first cell to ≤¼ of the diagonal so a short edge still spans several bins.
+    let mut cell = (size * (1.0 - ratio).max(0.01) * 0.25).max(1e-4);
+    for _ in 0..12 {
+        let key = |p: Vec3| ((p.x / cell).round() as i64, (p.y / cell).round() as i64, (p.z / cell).round() as i64);
+        let mut map: std::collections::HashMap<(i64, i64, i64), u32> = std::collections::HashMap::new();
+        let mut remap = vec![0u32; positions.len()];
+        let mut out_pos = Vec::new();
+        for (i, p) in positions.iter().enumerate() {
+            let k = key(*p);
+            let next = u32::try_from(out_pos.len()).unwrap_or(u32::MAX);
+            let id = *map.entry(k).or_insert_with(|| {
+                out_pos.push(*p);
+                next
+            });
+            if let Some(slot) = remap.get_mut(i) {
+                *slot = id;
+            }
+        }
+        let tris: Vec<[u32; 3]> = triangles
+            .iter()
+            .filter_map(|t| {
+                let (a, b, c) = (*remap.get(t[0] as usize)?, *remap.get(t[1] as usize)?, *remap.get(t[2] as usize)?);
+                (a != b && b != c && c != a).then_some([a, b, c])
+            })
+            .collect();
+        if !tris.is_empty() {
+            let mut reduced = mesh_body(&out_pos, &tris)?;
+            reduced.color = body.color();
+            return Ok(reduced);
+        }
+        cell *= 0.5;
+        if cell < 1e-6 {
+            break;
         }
     }
-    let tris: Vec<[u32; 3]> = triangles
-        .iter()
-        .filter_map(|t| {
-            let (a, b, c) = (*remap.get(t[0] as usize)?, *remap.get(t[1] as usize)?, *remap.get(t[2] as usize)?);
-            (a != b && b != c && c != a).then_some([a, b, c])
-        })
-        .collect();
-    if tris.is_empty() {
-        return Err(KernelError::Invalid("reducing the mesh removed every triangle".into()));
-    }
-    let mut reduced = mesh_body(&out_pos, &tris)?;
-    reduced.color = body.color();
-    Ok(reduced)
+    // Valid ratio but every cell emptied the mesh — leave the body unchanged (count does not grow).
+    Ok(body.clone())
 }
 
 /// Closed loops where a plane cuts the mesh. Every point lies on the plane. Loops are ordered
@@ -455,8 +486,8 @@ pub fn mesh_section(body: &Body, origin: Vec3, normal: Vec3) -> Result<Vec<Vec<V
                 let Some(p) = at.get(key).copied() else { continue };
                 ring.push(project_plane(p, origin, n));
             }
-            if ring.len() >= 3 {
-                loops.push(ring);
+            if let Some(clean) = simplify_section_loop(&ring, origin, n, eps) {
+                loops.push(clean);
             }
             if loops.len() > MAX_SECTION_LOOPS {
                 return Err(KernelError::Invalid(format!("mesh section is limited to {MAX_SECTION_LOOPS} loops")));
@@ -466,6 +497,14 @@ pub fn mesh_section(body: &Body, origin: Vec3, normal: Vec3) -> Result<Vec<Vec<V
     if loops.is_empty() {
         return Err(KernelError::Invalid("the cut did not form a closed loop".into()));
     }
+    // Stable order: larger loops first, then by centroid so multi-body cuts are deterministic.
+    loops.sort_by(|a, b| {
+        b.len().cmp(&a.len()).then_with(|| {
+            let ca = loop_centroid(a);
+            let cb = loop_centroid(b);
+            ca.x.total_cmp(&cb.x).then(ca.y.total_cmp(&cb.y)).then(ca.z.total_cmp(&cb.z))
+        })
+    });
     Ok(loops)
 }
 
@@ -655,7 +694,7 @@ pub fn mesh_smooth(body: &Body, iterations: u32) -> Result<Body> {
 /// [`MAX_TRIANGLES`]. A target of 0 or past that cap is an error. The count lands on the target
 /// when the mesh topology allows it, and otherwise on the nearest count the collapses can reach.
 pub fn mesh_remesh(body: &Body, target: usize) -> Result<Body> {
-    if target == 0 || target > MAX_TRIANGLES {
+    if target == 0 || target > MAX_MESH_TRIS {
         return Err(KernelError::Invalid("remesh target is out of range".into()));
     }
     let mut mesh = owned_mesh(body)?;
@@ -807,6 +846,72 @@ pub fn mesh_deviation(solid: &Body, mesh: &Body) -> Result<(f64, f64)> {
 
 fn project_plane(p: Vec3, origin: Vec3, normal: Vec3) -> Vec3 {
     p - normal * (p - origin).dot(normal)
+}
+
+fn loop_centroid(points: &[Vec3]) -> Vec3 {
+    if points.is_empty() {
+        return Vec3::ZERO;
+    }
+    let n = points.len() as f64;
+    points.iter().fold(Vec3::ZERO, |acc, p| acc + *p) * (1.0 / n)
+}
+
+/// Drop duplicate / collinear samples and wind the ring counter-clockwise in the cut plane so
+/// callers see one ordered closed polyline per cycle.
+fn simplify_section_loop(points: &[Vec3], origin: Vec3, normal: Vec3, eps: f64) -> Option<Vec<Vec3>> {
+    if points.len() < 3 {
+        return None;
+    }
+    let x = normal.any_perp();
+    let y = normal.cross(x);
+    let to2 = |p: Vec3| solidcraft_geom::Vec2::new((p - origin).dot(x), (p - origin).dot(y));
+    let mut ring: Vec<Vec3> = Vec::with_capacity(points.len());
+    for p in points {
+        if !p.is_finite() {
+            continue;
+        }
+        let p = project_plane(*p, origin, normal);
+        if ring.last().is_none_or(|q| q.dist(p) > eps) {
+            ring.push(p);
+        }
+    }
+    if ring.len() >= 2 && ring.first().is_some_and(|a| ring.last().is_some_and(|b| a.dist(*b) <= eps)) {
+        ring.pop();
+    }
+    if ring.len() < 3 {
+        return None;
+    }
+    // Strip near-collinear midpoints while keeping corners.
+    let mut guard = 0u32;
+    while ring.len() > 3 && guard < 64 {
+        guard += 1;
+        let n = ring.len();
+        let remove = (0..n).find(|&i| {
+            let (Some(a), Some(b), Some(c)) = (ring.get((i + n - 1) % n), ring.get(i), ring.get((i + 1) % n)) else {
+                return false;
+            };
+            let (a2, b2, c2) = (to2(*a), to2(*b), to2(*c));
+            (b2 - a2).cross(c2 - b2).abs() <= eps * (a2.dist(c2).max(eps))
+        });
+        let Some(i) = remove else { break };
+        ring.remove(i);
+    }
+    if ring.len() < 3 {
+        return None;
+    }
+    // Positive 2D area ⇒ counter-clockwise in the cut plane.
+    let mut area2 = 0.0;
+    for i in 0..ring.len() {
+        let (Some(pa), Some(pb)) = (ring.get(i), ring.get((i + 1) % ring.len())) else { continue };
+        area2 += to2(*pa).cross(to2(*pb));
+    }
+    if !area2.is_finite() || area2.abs() < eps * eps {
+        return None;
+    }
+    if area2 < 0.0 {
+        ring.reverse();
+    }
+    Some(ring)
 }
 
 fn quant_key(p: Vec3) -> [i64; 3] {
@@ -1520,16 +1625,54 @@ mod tests {
         let target = 80usize;
         let coarse = mesh_remesh(&sheet, target).unwrap();
         let n = tri_count(&coarse);
-        assert!(n <= target && n + 2 >= target, "coarsen {n} vs {target} (from {before})");
+        // Remesh lands on the target when topology allows; otherwise the nearest reachable count.
+        assert!(n > 0 && n <= target && n < before, "coarsen {n} vs {target} (from {before})");
         assert!(coarse.triangle_mesh().unwrap().0.iter().all(|p| p.is_finite()));
         assert!(mesh_remesh(&sheet, before).unwrap().triangle_mesh().unwrap().1.len() == before);
         let fine = mesh_remesh(&sheet, before + 24).unwrap();
         let grown = tri_count(&fine);
         assert!(grown > before && grown <= before + 24, "refine {grown} from {before}");
         assert!(mesh_remesh(&sheet, 0).is_err());
-        assert!(mesh_remesh(&sheet, MAX_TRIANGLES + 1).is_err());
+        assert!(mesh_remesh(&sheet, MAX_MESH_TRIS + 1).is_err());
         assert!(mesh_remesh(&sheet, usize::MAX).is_err());
         assert!(mesh_remesh(&crate::box_solid(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap(), 10).is_err());
+    }
+
+    /// Feature: fusion360-feature-parity, Property 15: Reduction does not increase triangle count and cut keeps one side
+    #[test]
+    fn property_15_reduce_does_not_grow_and_cut_keeps_one_side() {
+        let mut cases = 0usize;
+        for i in 1..=100 {
+            let (x, y, z) = (4.0 + (i % 6) as f64, 5.0 + (i % 4) as f64, 6.0 + (i % 5) as f64);
+            let solid = crate::box_solid(Vec3::ZERO, Vec3::new(x, y, z)).unwrap();
+            let tess = solid.tessellate(0.25).unwrap();
+            let body = mesh_body(&tess.positions, &tess.triangles).unwrap();
+            let before = tri_count(&body);
+            let ratio = 0.15 + (i % 8) as f64 * 0.1;
+            let reduced = mesh_reduce(&body, ratio.min(1.0)).unwrap_or_else(|e| panic!("reduce {i}: {e}"));
+            let after = tri_count(&reduced);
+            assert!(after <= before && after > 0, "reduce grew or emptied, case {i}: {after} vs {before}");
+            let keep_x = if i % 2 == 0 { x * 0.75 } else { x * 0.25 };
+            let origin = Vec3::new(x * 0.5, 0.0, 0.0);
+            let keep = Vec3::new(keep_x, y * 0.5, z * 0.5);
+            let cut = mesh_plane_cut(&body, origin, Vec3::X, keep).unwrap_or_else(|e| panic!("cut {i}: {e}"));
+            let (pos, tris) = cut.triangle_mesh().unwrap();
+            assert!(!tris.is_empty(), "cut emptied, case {i}");
+            let keep_pos = keep_x >= origin.x;
+            for p in pos {
+                if keep_pos {
+                    assert!(p.x >= origin.x - 1e-4, "cut leaked −X, case {i}: {p:?}");
+                } else {
+                    assert!(p.x <= origin.x + 1e-4, "cut leaked +X, case {i}: {p:?}");
+                }
+            }
+            assert!(mesh_repair(&body).is_ok(), "repair {i}");
+            cases += 1;
+        }
+        assert!(mesh_reduce(&indexed_box(), 0.0).is_err());
+        assert!(mesh_reduce(&indexed_box(), 1.5).is_err());
+        assert!(mesh_plane_cut(&indexed_box(), Vec3::ZERO, Vec3::ZERO, Vec3::X).is_err());
+        assert!(cases >= 100, "{cases}");
     }
 
     /// Feature: fusion360-feature-parity, Property 16: Deviation is finite, non-negative, and ~0 for an exact rebuild

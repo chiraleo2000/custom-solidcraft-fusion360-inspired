@@ -1,0 +1,160 @@
+{
+  "id": "pdf_day11_dog_bowl_surfaces",
+  "day": 11,
+  "title": "Dog bowl / surfaces intro",
+  "description": "Revolve a bowl, shell a dish, surface patch thicken smoke.",
+  "commands": [
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XZ",
+        "name": "Bowl"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            20,
+            0
+          ],
+          [
+            40,
+            0
+          ],
+          [
+            40,
+            4
+          ],
+          [
+            24,
+            4
+          ],
+          [
+            22,
+            30
+          ],
+          [
+            20,
+            30
+          ],
+          [
+            20,
+            0
+          ]
+        ],
+        "ids": [
+          "a",
+          "b",
+          "c",
+          "d",
+          "e",
+          "f"
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.revolve",
+      "params": {
+        "sketch": "Bowl",
+        "axis": "Z",
+        "angle": "360 deg",
+        "body_name": "Bowl"
+      }
+    },
+    {
+      "command": "solid.box",
+      "params": {
+        "length": 50,
+        "width": 50,
+        "height": 20,
+        "corner": [
+          80,
+          0,
+          0
+        ],
+        "body_name": "Dish"
+      }
+    },
+    {
+      "command": "solid.shell",
+      "params": {
+        "body": "Dish",
+        "faces": [
+          [
+            105,
+            25,
+            20
+          ]
+        ],
+        "thickness": "2 mm"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": {
+          "origin": [
+            0,
+            80,
+            0
+          ],
+          "x_dir": [
+            1,
+            0,
+            0
+          ],
+          "y_dir": [
+            0,
+            1,
+            0
+          ]
+        },
+        "name": "Pad"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          0,
+          0
+        ],
+        "p1": [
+          24,
+          16
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "surface.patch",
+      "params": {
+        "sketch": "Pad",
+        "body_name": "LidSkin"
+      }
+    },
+    {
+      "command": "surface.thicken",
+      "params": {
+        "bodies": [
+          "LidSkin"
+        ],
+        "thickness": "1 mm",
+        "body_name": "Lid"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

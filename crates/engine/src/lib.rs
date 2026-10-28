@@ -17,6 +17,7 @@ pub mod occurrences;
 pub mod params;
 pub mod recovery;
 pub mod sample;
+pub mod shell_discovery;
 pub mod view;
 
 use std::sync::Arc;

@@ -103,8 +103,14 @@ pub fn measure(b: &Body) -> Result<BodyMeasure> {
         v6 += pick.1;
         mom += pick.2;
     }
-    let volume = v6 / 6.0;
-    let centroid = if v6.abs() > 1e-12 { mom / (4.0 * v6) } else { fine.bounds().center() };
+    // Open shells have no interior: the divergence sum is not a volume.
+    let (volume, centroid) = if b.is_surface() {
+        (0.0, fine.bounds().center())
+    } else {
+        let volume = v6 / 6.0;
+        let centroid = if v6.abs() > 1e-12 { mom / (4.0 * v6) } else { fine.bounds().center() };
+        (volume, centroid)
+    };
     Ok(BodyMeasure {
         volume,
         area,

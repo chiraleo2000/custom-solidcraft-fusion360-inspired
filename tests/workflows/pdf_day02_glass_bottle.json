@@ -1,0 +1,109 @@
+{
+  "id": "pdf_day02_glass_bottle",
+  "day": 2,
+  "title": "Glass bottle",
+  "description": "Calibrated canvas, centerline + profile, revolve, glass appearance.",
+  "commands": [
+    {
+      "command": "canvas.insert",
+      "params": {
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "plane": "XZ",
+        "width": 100,
+        "name": "Reference"
+      }
+    },
+    {
+      "command": "canvas.calibrate",
+      "params": {
+        "canvas": "Reference",
+        "a": [
+          0,
+          0
+        ],
+        "b": [
+          50,
+          0
+        ],
+        "distance": 50
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XZ",
+        "name": "Profile"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            12
+          ]
+        ],
+        "ids": [
+          "axis"
+        ]
+      }
+    },
+    {
+      "command": "sketch.centerline",
+      "params": {
+        "curves": [
+          "axis"
+        ],
+        "value": true
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          10,
+          2
+        ],
+        "p1": [
+          15,
+          7
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.revolve",
+      "params": {
+        "sketch": "Profile",
+        "profiles": [
+          0
+        ],
+        "axis": "axis",
+        "angle": "360 deg",
+        "body_name": "Bottle",
+        "name": "Turn"
+      }
+    },
+    {
+      "command": "appearance.assign",
+      "params": {
+        "bodies": [
+          "Bottle"
+        ],
+        "appearance": "Glass - Clear"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

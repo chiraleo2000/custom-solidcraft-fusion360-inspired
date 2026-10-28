@@ -1,0 +1,131 @@
+{
+  "id": "pdf_day01_toy_block",
+  "day": 1,
+  "title": "Toy block",
+  "description": "Rect + circle sketch, extrude, fillet, chamfer, rectangular pattern, shell, appearance, new component.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "component.create",
+      "params": {
+        "name": "Toy",
+        "activate": true
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Base"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          0,
+          0
+        ],
+        "p1": [
+          40,
+          30
+        ]
+      }
+    },
+    {
+      "command": "sketch.circle.center",
+      "params": {
+        "center": [
+          20,
+          15
+        ],
+        "diameter": 10
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.extrude",
+      "params": {
+        "sketch": "Base",
+        "distance": 15,
+        "operation": "new",
+        "body_name": "Block"
+      }
+    },
+    {
+      "command": "solid.fillet",
+      "params": {
+        "edges": [
+          [
+            0,
+            0,
+            7.5
+          ]
+        ],
+        "radius": 2,
+        "body": "Block"
+      }
+    },
+    {
+      "command": "solid.chamfer",
+      "params": {
+        "edges": [
+          [
+            40,
+            0,
+            7.5
+          ]
+        ],
+        "distance": 1,
+        "body": "Block"
+      }
+    },
+    {
+      "command": "appearance.assign",
+      "params": {
+        "bodies": [
+          "Block"
+        ],
+        "color": "#c4a574",
+        "metalness": 0.2,
+        "roughness": 0.5
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    },
+    {
+      "command": "solid.shell",
+      "params": {
+        "faces": [
+          [
+            20,
+            15,
+            15
+          ]
+        ],
+        "thickness": "2 mm",
+        "body": "Block"
+      }
+    },
+    {
+      "command": "solid.pattern.rectangular",
+      "params": {
+        "bodies": [
+          "Block"
+        ],
+        "dir1": [
+          50,
+          0,
+          0
+        ],
+        "count1": 2,
+        "spacing1": 50
+      }
+    }
+  ]
+}

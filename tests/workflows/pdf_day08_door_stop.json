@@ -1,0 +1,157 @@
+{
+  "id": "pdf_day08_door_stop",
+  "day": 8,
+  "title": "Door stop",
+  "description": "Constrained wedge, extrude, shell, rib.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Wedge"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            0,
+            0
+          ],
+          [
+            40,
+            0
+          ],
+          [
+            40,
+            8
+          ],
+          [
+            0,
+            20
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        "ids": [
+          "b",
+          "r",
+          "t",
+          "l"
+        ]
+      }
+    },
+    {
+      "command": "sketch.constraint.horizontal_vertical",
+      "params": {
+        "line": "b",
+        "mode": "horizontal"
+      }
+    },
+    {
+      "command": "sketch.constraint.horizontal_vertical",
+      "params": {
+        "line": "r",
+        "mode": "vertical"
+      }
+    },
+    {
+      "command": "sketch.dimension",
+      "params": {
+        "entities": [
+          "b"
+        ],
+        "value": 40
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.extrude",
+      "params": {
+        "sketch": "Wedge",
+        "distance": 20,
+        "body_name": "Stop"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": {
+          "origin": [
+            0,
+            10,
+            0
+          ],
+          "x_dir": [
+            1,
+            0,
+            0
+          ],
+          "y_dir": [
+            0,
+            0,
+            1
+          ]
+        },
+        "name": "Rib"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            5,
+            15
+          ],
+          [
+            30,
+            5
+          ]
+        ],
+        "ids": [
+          "rib"
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.rib",
+      "params": {
+        "sketch": "Rib",
+        "curves": [
+          "rib"
+        ],
+        "thickness": 3
+      }
+    },
+    {
+      "command": "solid.shell",
+      "params": {
+        "faces": [
+          [
+            20,
+            4,
+            20
+          ]
+        ],
+        "thickness": "2 mm",
+        "body": "Stop"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

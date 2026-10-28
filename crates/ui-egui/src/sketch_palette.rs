@@ -384,10 +384,19 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         crate::frame::heading(ui, Level::Section, width, |ui| {
             ui.label(RichText::new(app.tr("ui.sketch_status")).size(12.0));
         });
-        ui.label(RichText::new(crate::i18n::tr_dyn(&dof_line)).color(if ok { t.sketch_accent } else { t.text_dim }));
+        // Fully defined → lock-dark; conflict → red; under-defined → warning (Days 14/16–17).
+        let status_color = if ok {
+            t.sketch_fixed
+        } else if dof_line.contains("conflict") {
+            t.error
+        } else {
+            t.warning
+        };
+        ui.label(RichText::new(crate::i18n::tr_dyn(&dof_line)).color(status_color));
         // One line between the status and Finish Sketch, and below it to the edge.
         ui.add_space((line - gap).max(0.0));
         // A row as tall as the button, so the gap below it is just the line.
+        let mut auto = false;
         ui.allocate_ui_with_layout(vec2(ui.available_width(), 0.0), egui::Layout::right_to_left(egui::Align::Min), |ui| {
             let button = ui.add(egui::Button::new(RichText::new(app.tr("ui.finish_sketch")).color(Color32::WHITE)).fill(t.accent));
             crate::scenario::publish_rect("sketch_palette:finish", button.rect);
@@ -395,8 +404,23 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             if button.clicked() {
                 finish = true;
             }
+            let auto_btn = ui.add(egui::Button::new(RichText::new(app.tr("ui.auto_constrain")))).on_hover_text(app.tr("ui.auto_constrain_tip"));
+            crate::scenario::publish_handle("sketch_palette:auto_constrain", auto_btn.rect.center());
+            if auto_btn.clicked() {
+                auto = true;
+            }
         });
         ui.add_space((line - margin_bottom).max(0.0));
+        if auto {
+            match app.run("sketch.auto_constrain", json!({})) {
+                Ok(r) => {
+                    let n = r["added"].as_array().map(Vec::len).unwrap_or(0);
+                    let dof = r["dof"].as_u64().unwrap_or(0);
+                    app.set_status(format!("AutoConstrain added {n} · {dof} degrees of freedom left"), false);
+                }
+                Err(e) => app.set_status(e, true),
+            }
+        }
     });
     app.viewport.palette_rect = response.map(|r| r.response.rect);
     if let Some(r) = app.viewport.palette_rect {

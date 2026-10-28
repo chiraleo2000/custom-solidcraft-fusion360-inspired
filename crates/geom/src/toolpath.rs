@@ -249,6 +249,89 @@ pub fn offset_closed(points: &[Vec2], distance: f64) -> Result<Vec<Vec2>, &'stat
     Ok(out)
 }
 
+/// Even-odd containment against a closed polyline.
+pub fn point_in_closed(poly: &[Vec2], q: Vec2) -> bool {
+    if !q.is_finite() || poly.len() < 3 || poly.len() > 8_000 {
+        return false;
+    }
+    let n = poly.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (Some(a), Some(b)) = (poly.get(i), poly.get((i + 1) % n)) else { continue };
+        if (a.y > q.y) != (b.y > q.y) {
+            let x = a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if q.x < x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// Grow each island (hole) by the tool radius into the pocket material. The hole
+/// loop is normalised to CCW so a positive offset expands into the pocket.
+pub fn island_keepouts(holes: &[Vec<Vec2>], tool_radius: f64) -> Result<Vec<Vec<Vec2>>, &'static str> {
+    if !(tool_radius.is_finite() && tool_radius > 0.0 && tool_radius < 1e5) {
+        return Err("the tool radius must be positive");
+    }
+    if holes.len() > 64 {
+        return Err("too many islands");
+    }
+    let mut out = Vec::with_capacity(holes.len());
+    for hole in holes {
+        let pts = polish(hole)?;
+        let area = signed_area(&pts);
+        if area.abs() < 1e-8 {
+            return Err("an island has no area");
+        }
+        // Holes are stored clockwise; flip to CCW so a positive offset grows into the pocket.
+        let ccw: Vec<Vec2> = if area > 0.0 { pts } else { pts.into_iter().rev().collect() };
+        out.push(offset_closed(&ccw, tool_radius)?);
+    }
+    Ok(out)
+}
+
+/// Drop pocket passes that enter any island keep-out. Empty after filtering is an error
+/// when keep-outs were supplied (the tool does not fit around the islands).
+pub fn filter_pocket_passes(passes: Vec<Vec<Vec2>>, keepouts: &[Vec<Vec2>]) -> Result<Vec<Vec<Vec2>>, &'static str> {
+    if keepouts.is_empty() {
+        return Ok(passes);
+    }
+    let mut kept = Vec::with_capacity(passes.len());
+    for pass in passes {
+        let clear = pass.iter().all(|q| keepouts.iter().all(|k| !point_in_closed(k, *q)));
+        if clear {
+            kept.push(pass);
+        }
+    }
+    if kept.is_empty() {
+        return Err("the tool does not fit around the islands");
+    }
+    Ok(kept)
+}
+
+/// Contour tool-centre loops: outer grown by the tool radius, plus one shrunk loop
+/// per island (tool in the void against the island wall).
+pub fn contour_passes(outer: &[Vec2], holes: &[Vec<Vec2>], tool_radius: f64) -> Result<Vec<Vec<Vec2>>, &'static str> {
+    if !(tool_radius.is_finite() && tool_radius > 0.0 && tool_radius < 1e5) {
+        return Err("the tool radius must be positive");
+    }
+    if holes.len() > 64 {
+        return Err("too many islands");
+    }
+    let mut passes = vec![offset_closed(outer, tool_radius)?];
+    for hole in holes {
+        let pts = polish(hole)?;
+        let area = signed_area(&pts);
+        if area.abs() < 1e-8 {
+            return Err("an island has no area");
+        }
+        let ccw: Vec<Vec2> = if area > 0.0 { pts } else { pts.into_iter().rev().collect() };
+        passes.push(offset_closed(&ccw, -tool_radius)?);
+    }
+    Ok(passes)
+}
+
 /// Tool-centre loops for a pocket: the first is inset by the tool radius, then
 /// by `stepover` each time, until the remaining island will not take the tool.
 pub fn inset_passes(profile: &[Vec2], tool_radius: f64, stepover: f64) -> Result<Vec<Vec<Vec2>>, &'static str> {
@@ -266,6 +349,16 @@ pub fn inset_passes(profile: &[Vec2], tool_radius: f64, stepover: f64) -> Result
         inset += stepover;
     }
     Err("the stepover is too fine")
+}
+
+/// Like [`inset_passes`], then drop loops that enter island keep-outs.
+pub fn inset_passes_around(profile: &[Vec2], holes: &[Vec<Vec2>], tool_radius: f64, stepover: f64) -> Result<Vec<Vec<Vec2>>, &'static str> {
+    let raw = inset_passes(profile, tool_radius, stepover)?;
+    if holes.is_empty() {
+        return Ok(raw);
+    }
+    let keepouts = island_keepouts(holes, tool_radius)?;
+    filter_pocket_passes(raw, &keepouts)
 }
 
 /// Positive cut depths, stepping by `stepdown` and ending on `depth`.
@@ -443,6 +536,25 @@ mod tests {
         assert_eq!(passes.len(), 2, "{passes:?}");
         assert!((polygon_area(&passes[0]) - 64.0).abs() < 1e-9);
         assert!((polygon_area(&passes[1]) - 16.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn contour_and_pocket_respect_islands() {
+        let outer = square();
+        let island = vec![Vec2::new(3.0, 3.0), Vec2::new(7.0, 3.0), Vec2::new(7.0, 7.0), Vec2::new(3.0, 7.0)];
+        // Clockwise hole winding, as sketch regions store holes.
+        let hole: Vec<Vec2> = island.iter().copied().rev().collect();
+        let contours = contour_passes(&outer, &[hole.clone()], 1.0).unwrap();
+        assert_eq!(contours.len(), 2, "{contours:?}");
+        assert!((polygon_area(&contours[0]) - 144.0).abs() < 1e-6, "{:?}", contours[0]);
+        assert!((polygon_area(&contours[1]) - 4.0).abs() < 1e-6, "{:?}", contours[1]);
+        let keepouts = island_keepouts(&[hole.clone()], 1.0).unwrap();
+        assert!(point_in_closed(&keepouts[0], Vec2::new(5.0, 5.0)));
+        assert!(point_in_closed(&keepouts[0], Vec2::new(2.5, 5.0)));
+        assert!(!point_in_closed(&keepouts[0], Vec2::new(0.5, 0.5)));
+        let pocket = inset_passes_around(&outer, &[hole], 1.0, 2.0).unwrap();
+        assert!(!pocket.is_empty(), "{pocket:?}");
+        assert!(pocket.iter().all(|pass| pass.iter().all(|q| !point_in_closed(&keepouts[0], *q))));
     }
 
     #[test]

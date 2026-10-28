@@ -1,0 +1,117 @@
+{
+  "id": "pdf_day07_handlebar_grip",
+  "day": 7,
+  "title": "Handlebar grip",
+  "description": "Revolve grip body, circular pattern of cuts, chamfer and fillet.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XZ",
+        "name": "Profile"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          8,
+          0
+        ],
+        "p1": [
+          14,
+          40
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.revolve",
+      "params": {
+        "sketch": "Profile",
+        "axis": "Z",
+        "angle": "360 deg",
+        "body_name": "Grip"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Flute"
+      }
+    },
+    {
+      "command": "sketch.circle.center",
+      "params": {
+        "center": [
+          11,
+          0
+        ],
+        "diameter": 3
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.extrude",
+      "params": {
+        "sketch": "Flute",
+        "distance": 40,
+        "operation": "cut",
+        "targets": [
+          "Grip"
+        ],
+        "name": "FluteCut"
+      }
+    },
+    {
+      "command": "solid.pattern.circular",
+      "params": {
+        "features": [
+          "FluteCut"
+        ],
+        "axis": "Z",
+        "count": 6
+      }
+    },
+    {
+      "command": "solid.chamfer",
+      "params": {
+        "edges": [
+          [
+            14,
+            0,
+            0
+          ]
+        ],
+        "distance": 0.5,
+        "body": "Grip"
+      }
+    },
+    {
+      "command": "solid.fillet",
+      "params": {
+        "edges": [
+          [
+            14,
+            0,
+            40
+          ]
+        ],
+        "radius": 0.8,
+        "body": "Grip"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

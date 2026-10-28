@@ -134,25 +134,78 @@ fn balloons_follow_the_parts_list_and_exports_keep_the_sheet() {
     assert!(note.lost, "{note:?}");
     assert_eq!(s.doc.drawings[0].parts.len(), 1);
 
-    run(&mut s, "drawing.title_block", json!({"title": "Bracket", "size": "A4"}));
+    let title = run(
+        &mut s,
+        "drawing.title_block",
+        json!({"title": "Bracket", "size": "A4", "template": "asme", "revision": "A", "drawn": "SC", "date": "2026-10-28", "material": "Al"}),
+    );
+    assert_eq!(title["template"], "asme");
+    assert_eq!(title["revision"], "A");
     run(&mut s, "drawing.standard", json!({"standard": "iso", "arrows": "filled"}));
     assert_eq!(s.doc.drawings[0].standard, "first_angle");
     let svg = run(&mut s, "drawing.export_svg", json!({}));
-    let svg = svg["svg"].as_str().unwrap();
-    assert!(svg.contains("<svg") && svg.contains("Bracket") && svg.contains("SolidCraft") && svg.contains("stroke-dasharray"), "{svg}");
+    assert_eq!(svg["paper"], "A4");
+    assert_eq!(svg["template"], "asme");
+    let svg_text = svg["svg"].as_str().unwrap();
+    assert!(
+        svg_text.contains("<svg")
+            && svg_text.contains("Bracket")
+            && svg_text.contains("SolidCraft")
+            && svg_text.contains("stroke-dasharray")
+            && svg_text.contains("id=\"VISIBLE\"")
+            && svg_text.contains("Rev A"),
+        "{svg_text}"
+    );
     let dir = std::env::temp_dir();
     let dxf_path = dir.join("solidcraft-drawing-stage2.dxf");
     let pdf_path = dir.join("solidcraft-drawing-stage2.pdf");
-    run(&mut s, "drawing.export_dxf", json!({"path": dxf_path.to_string_lossy()}));
+    let dxf_meta = run(&mut s, "drawing.export_dxf", json!({"path": dxf_path.to_string_lossy()}));
+    assert!(dxf_meta["lines"].as_u64().unwrap_or(0) > 4, "{dxf_meta}");
     let dxf = std::fs::read_to_string(&dxf_path).unwrap();
     assert!(dxf.contains("ENTITIES") && dxf.contains("SC_DASH") && dxf.contains("$INSUNITS"));
     let back = solidcraft_io::read_dxf(&dxf).unwrap();
     assert!(back.iter().filter(|g| matches!(g, solidcraft_io::Geom2::Line(_, _))).count() > 4, "{back:?}");
-    run(&mut s, "drawing.export_pdf", json!({"path": pdf_path.to_string_lossy()}));
+    let pdf_meta = run(&mut s, "drawing.export_pdf", json!({"path": pdf_path.to_string_lossy()}));
+    assert_eq!(pdf_meta["page_mm"][0], 297.0);
     let pdf = std::fs::read_to_string(&pdf_path).unwrap();
-    assert!(pdf.contains("%PDF-1.4") && pdf.contains("xref") && pdf.contains("Helvetica") && pdf.contains(" l ") && pdf.contains("Bracket"), "{pdf}");
+    assert!(
+        pdf.contains("%PDF-1.4")
+            && pdf.contains("xref")
+            && pdf.contains("Helvetica")
+            && pdf.contains(" l ")
+            && pdf.contains("Bracket")
+            && pdf.contains("/Title (Bracket)"),
+        "{pdf}"
+    );
     let _ = std::fs::remove_file(dxf_path);
     let _ = std::fs::remove_file(pdf_path);
+}
+
+#[test]
+fn associative_dimensions_follow_the_view_and_bom_qty_tracks_occurrences() {
+    let mut s = Session::default();
+    box_sheet(&mut s);
+    run(&mut s, "drawing.base_view", json!({"direction": [0, 0, -1], "origin": [0, 0], "hidden": true}));
+    run(&mut s, "drawing.dimension", json!({"body": "Block", "axis": "x", "at": [99, 99]}));
+    let at = s.doc.drawings[0].notes[0].at;
+    assert!(near(at[0], 24.0) && near(at[1], 5.0), "dim should sit outside the projected width: {at:?}");
+    run(&mut s, "component.create", json!({"name": "Peg"}));
+    let peg = s.doc.components.iter().find(|c| c.name == "Peg").map(|c| c.id).expect("Peg");
+    run(&mut s, "occurrence.copy", json!({"component": peg, "translate": [30, 0, 0]}));
+    let list = run(&mut s, "drawing.parts_list", json!({}));
+    let peg_row = list["parts"].as_array().unwrap().iter().find(|r| r["name"] == "Peg").expect("Peg row");
+    assert_eq!(peg_row["qty"], 2, "{list}");
+    run(&mut s, "drawing.balloon", json!({"component": "Peg", "at": [40, 40]}));
+    assert_eq!(s.doc.drawings[0].notes.iter().find(|n| n.kind == "balloon").map(|n| n.item), Some(peg_row["item"].as_u64().unwrap() as u32));
+    run(&mut s, "drawing.project", json!({"from": 0, "side": "right", "origin": [50, 0]}));
+    assert!(s.doc.drawings[0].views[1].parent == Some(0));
+    assert!(s.doc.drawings[0].views[1].lost.is_empty());
+    s.doc_mut().drawings[0].views[1].parent = Some(99);
+    s.refresh();
+    assert!(s.doc.drawings[0].views[1].lost.iter().any(|n| n == "parent-view"));
+    let svg = run(&mut s, "drawing.export_svg", json!({}));
+    let lost = svg["lost"].as_array().expect("lost");
+    assert!(lost.iter().any(|v| v.as_str() == Some("parent-view")), "{svg}");
 }
 
 #[test]
@@ -184,6 +237,7 @@ fn an_old_drawing_sheet_still_loads() {
     let sheet: DrawingSheet = serde_json::from_str(raw).unwrap();
     assert_eq!(sheet.views[0].origin, [1.0, 2.0]);
     assert!(sheet.parts.is_empty() && sheet.title.is_empty());
+    assert!(sheet.template.is_empty() && sheet.revision.is_empty() && sheet.drawn.is_empty());
     assert!(!sheet.views[0].cache_valid && sheet.views[0].curves.is_empty());
     assert_eq!(sheet.notes[0].text, "hi");
     let again: DrawingSheet = serde_json::from_str(&serde_json::to_string(&sheet).unwrap()).unwrap();

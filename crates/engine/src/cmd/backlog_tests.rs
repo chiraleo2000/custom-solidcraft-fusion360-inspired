@@ -197,8 +197,9 @@ fn a_pocket_reports_removed_stock_and_a_short_is_only_a_report() {
     run(&mut s, "generative.study", json!({"preserve": ["Keep"], "objective": "mass"}));
     let before = s.doc.features.len();
     let generated = run(&mut s, "generative.solve", json!({}));
-    assert!((generated["width"].as_f64().unwrap() - 6.0).abs() < 1e-6, "{generated}");
-    assert_eq!(generated["method"], "solidcraft-section-reduction");
+    assert_eq!(generated["method"], "solidcraft-structured-lattice");
+    assert!(generated["cells"].as_u64().unwrap() > 1, "{generated}");
+    assert!(generated["width"].as_f64().unwrap() > 0.0, "{generated}");
     assert_eq!(s.doc.features.len(), before);
     assert!(s.model.state().body("Candidate").is_none());
     run(&mut s, "generative.promote", json!({}));

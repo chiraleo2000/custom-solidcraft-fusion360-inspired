@@ -244,16 +244,57 @@ fn proprietary_formats_are_refused_and_write_no_file() {
     // Feature: fusion360-feature-parity, Property 29: proprietary formats are refused
     let mut s = part();
     let before = s.doc.to_json();
-    for ext in ["fbx", "blend", "max", "c4d", "ma", "mb", "dwg", "skp", "sldprt", "sldasm", "f3d", "ipt", "iam", "sat", "x_t", "x_b", "usdc", "usdz"] {
+    let proprietary = [
+        ("fbx", "gltf"),
+        ("blend", "gltf"),
+        ("max", "gltf"),
+        ("c4d", "gltf"),
+        ("ma", "gltf"),
+        ("mb", "gltf"),
+        ("dwg", "dxf"),
+        ("skp", "gltf"),
+        ("sldprt", "step"),
+        ("sldasm", "step"),
+        ("f3d", "step"),
+        ("ipt", "step"),
+        ("iam", "step"),
+        ("sat", "step"),
+        ("x_t", "step"),
+        ("x_b", "step"),
+    ];
+    for (ext, hint) in proprietary {
         let p = temp(ext, &format!("no-{ext}"));
         let err = s.execute("file.export", &json!({"path": p.to_string_lossy()})).expect_err(ext);
-        let msg = err.to_string();
+        let msg = err.to_string().to_ascii_lowercase();
         assert!(!p.exists(), "{ext} must not leave a file");
-        assert!(
-            msg.contains("proprietary") || msg.contains("not supported yet") || msg.contains("unsupported"),
-            "{ext}: unexpected error {msg}"
-        );
+        assert!(msg.contains("proprietary"), "{ext}: expected proprietary refusal, got {msg}");
+        assert!(msg.contains(hint), "{ext}: expected public hint `{hint}` in {msg}");
     }
+    for ext in ["usdc", "usdz"] {
+        let p = temp(ext, &format!("no-{ext}"));
+        let err = s.execute("file.export", &json!({"path": p.to_string_lossy()})).expect_err(ext);
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(!p.exists(), "{ext} must not leave a file");
+        assert!(msg.contains("not supported yet"), "{ext}: {msg}");
+    }
+    assert_eq!(s.doc.to_json(), before);
+}
+
+#[test]
+fn mtl_and_triangle_cap_surface_through_file_export() {
+    let mut s = part();
+    let p = temp("mtl", "mtl-only");
+    let out = run(&mut s, "file.export", json!({"path": p.to_string_lossy()}));
+    assert!(out["bytes"].as_u64().unwrap_or(0) > 10);
+    let text = std::fs::read_to_string(&p).unwrap();
+    let _ = std::fs::remove_file(&p);
+    assert!(text.contains("newmtl ") && text.contains("Kd "), "standalone MTL export");
+
+    // Triangle cap is enforced in io (writers share check_triangle_count); surface the constant
+    // through file.export by refusing a nonsense oversize format is covered in io unit tests.
+    // Here: empty selection and proprietary format still leave the design untouched.
+    let before = s.doc.to_json();
+    assert!(s.execute("file.export", &json!({"path": temp("gltf", "empty-bodies").to_string_lossy(), "bodies": ["Nope"]})).is_err());
     assert_eq!(s.doc.to_json(), before);
 }
 

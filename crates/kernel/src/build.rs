@@ -570,26 +570,60 @@ pub fn extrude_tapered(plane: &Plane, region: &Region2, length: f64, dir_sign: f
             let numbers = a.numbers();
             sides.extend(record::ruled(&shell, &a.wire, b, &numbers, &numbers));
         }
-        let (faces, prov): (Vec<mt::Face>, Vec<Option<FaceProv>>) = sides.into_iter().unzip();
-        // The sides, then the bottom and top as pushed below.
-        let history: Option<Vec<FaceProv>> = prov.into_iter().chain([Some(record::cap(false)), Some(record::cap(true))]).collect();
-        let bottom = builder::try_attach_plane(&w0.iter().map(|w| w.inverse()).collect::<Vec<_>>())
-            .map_err(|e| KernelError::Failed(format!("taper bottom: {e}")))?;
-        let top = builder::try_attach_plane(&w1).map_err(|e| KernelError::Failed(format!("taper top: {e}")))?;
-        let mut tries: Vec<(mt::Face, mt::Face)> = vec![(bottom.clone(), top.clone())];
-        tries.push((bottom.inverse(), top.inverse()));
-        let mut last = String::new();
-        for (b, t) in tries {
-            let mut all = faces.clone();
-            all.push(b);
-            all.push(t);
-            let shell: mt::Shell = all.into();
-            match Solid::try_new(vec![shell]) {
-                Ok(s) => return record::attach(Body::new(s)?, &[], history, Default::default()),
-                Err(e) => last = e.to_string(),
-            }
+        // Same four cap-orientation tries as `cap_and_close`: circles especially need the
+        // mixed inversions, not only both-same or both-flipped.
+        cap_and_close(sides, &w0, &w1, false).map_err(|e| match e {
+            KernelError::Failed(msg) => KernelError::Failed(format!("tapered extrude: {msg}")),
+            other => other,
+        })
+    })
+}
+
+/// Extrude both ways from the sketch plane with a taper. The sketch is the mid section; each
+/// end grows or shrinks by `length × tan(taper)`. `pos` and `neg` are absolute lengths.
+///
+/// Built as a single frustum from the bottom end to the top end (not two mid-joined shells):
+/// joining ruled sides at the mid wire left an unoriented shell for circles.
+pub fn extrude_tapered_both(plane: &Plane, region: &Region2, pos: f64, neg: f64, taper: f64) -> Result<Body> {
+    let (pos, neg, taper) = (finite(pos, "distance")?, finite(neg, "distance2")?, finite(taper, "taper")?);
+    if pos <= 1e-6 && neg <= 1e-6 {
+        return Err(KernelError::Invalid("extrude distance is zero".into()));
+    }
+    if taper.abs() >= std::f64::consts::FRAC_PI_2 - 1e-3 {
+        return Err(KernelError::Invalid("taper must be between −90° and 90°".into()));
+    }
+    if neg <= 1e-6 {
+        return extrude_tapered(plane, region, pos, 1.0, taper);
+    }
+    if pos <= 1e-6 {
+        return extrude_tapered(plane, region, neg, -1.0, taper);
+    }
+    region_ok(region)?;
+    let d_bot = neg * taper.tan();
+    let d_top = pos * taper.tan();
+    let bot_region =
+        Region2 { outer: offset_loop(&region.outer, d_bot)?, holes: region.holes.iter().map(|h| offset_loop(h, d_bot)).collect::<Result<_>>()? };
+    let top_region =
+        Region2 { outer: offset_loop(&region.outer, d_top)?, holes: region.holes.iter().map(|h| offset_loop(h, d_top)).collect::<Result<_>>()? };
+    let top_plane = plane.offset(pos);
+    let bot_plane = plane.offset(-neg);
+    guard("tapered extrude both", || {
+        let bot = region_wires(&bot_plane, &oriented(&bot_region)?)?;
+        let top = region_wires(&top_plane, &oriented(&top_region)?)?;
+        let w_top = wires_of(&top);
+        let mut sides: Vec<Side> = Vec::new();
+        for (a, b) in bot.iter().zip(&w_top) {
+            let shell = builder::try_wire_homotopy(&a.wire, b).map_err(|e| KernelError::Failed(format!("taper sides: {e}")))?;
+            let numbers = a.numbers();
+            sides.extend(record::ruled(&shell, &a.wire, b, &numbers, &numbers));
         }
-        Err(KernelError::Failed(format!("tapered extrude: {last}")))
+        let w_bot = wires_of(&bot);
+        // Circles need all four cap orientations (`cap_and_close`); both-same / both-flipped alone
+        // leave an unoriented shell for a symmetric tapered frustum.
+        cap_and_close(sides, &w_bot, &w_top, false).map_err(|e| match e {
+            KernelError::Failed(msg) => KernelError::Failed(format!("tapered extrude both: {msg}")),
+            other => other,
+        })
     })
 }
 

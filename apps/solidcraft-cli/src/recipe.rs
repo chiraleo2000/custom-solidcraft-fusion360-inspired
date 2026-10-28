@@ -519,6 +519,25 @@ pub fn to_script(recipe: &Value) -> Result<Value, String> {
             Some("chamfer") => {
                 out.push(json!({"command": "solid.chamfer", "params": {"edges": edge_points(f), "distance": f.get("distance"), "name": name}}))
             }
+            Some("surface_patch") => {
+                let sketch = f.get("sketch").cloned().unwrap_or_else(|| name.clone());
+                let mut p = json!({"sketch": sketch, "name": name});
+                if let Some(first) = bodies.as_array().and_then(|a| a.first()) {
+                    p["body_name"] = first.clone();
+                }
+                out.push(json!({"command": "surface.patch", "params": p}));
+            }
+            Some("surface_thicken") => {
+                let bodies_in = f.get("bodies").cloned().unwrap_or_else(|| bodies.clone());
+                let mut p = json!({"bodies": bodies_in, "thickness": f.get("thickness").cloned().unwrap_or(json!(1)), "name": name});
+                if let Some(first) = bodies.as_array().and_then(|a| a.first()) {
+                    p["body_name"] = first.clone();
+                }
+                if f.get("symmetric").and_then(Value::as_bool) == Some(true) {
+                    p["symmetric"] = json!(true);
+                }
+                out.push(json!({"command": "surface.thicken", "params": p}));
+            }
             Some(other) => return Err(format!("recipe: feature op `{other}` is not supported yet")),
             None => return Err("recipe: feature without `op`".into()),
         }

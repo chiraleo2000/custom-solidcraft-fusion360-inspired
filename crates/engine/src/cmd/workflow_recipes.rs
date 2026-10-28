@@ -171,6 +171,78 @@ fn req_13_3_clearance_follows_a_parameter_and_keep_tools_keeps_the_tool() {
     assert_consistent(&nested);
 }
 
+/// Day 20 / DfAM: a print-in-place hinge leaf gets a parametric clearance gap that follows edits.
+#[test]
+fn wf_day20_hinge_clearance_follows_the_gap_parameter() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "clearance", "expression": "0.4 mm"}));
+    run(&mut s, "solid.box", json!({"length": 40, "width": 20, "height": 6, "body_name": "Leaf"}));
+    run(&mut s, "dfam.clearance", json!({"body": "Leaf", "gap": "clearance", "name": "PrintGap"}));
+    let after_gap = body_volume(&mut s, "Leaf");
+    assert!(rel(after_gap, 39.2 * 19.2 * 5.2) < 2e-2, "{after_gap}");
+    let changed = run(&mut s, "parameters.change", json!({"name": "clearance", "expression": "0.8 mm"}));
+    assert!(changed["errors"].as_array().is_some_and(|e| e.is_empty()), "{changed}");
+    let tighter = body_volume(&mut s, "Leaf");
+    assert!(tighter < after_gap, "{after_gap} -> {tighter}");
+    assert!(rel(tighter, 38.4 * 18.4 * 4.4) < 2e-2, "{tighter}");
+    assert_consistent(&s);
+}
+
+/// Day 21 / Req 13.8: prototype → mold box → keep-tools cavity → mid-height split → pins → spout.
+#[test]
+fn wf_day21_mold_box_cavity_split_pins_and_spout() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 24, "width": 18, "height": 10, "body_name": "Proto"}));
+    run(&mut s, "mold.box", json!({"body": "Proto", "margin": "5", "body_name": "Mold", "name": "Block"}));
+    // Explicit keep-tools combine (Req 13.3 / 14.2) beside the mold.cavity convenience.
+    run(&mut s, "solid.box", json!({"length": 24, "width": 18, "height": 10, "body_name": "Tool"}));
+    run(&mut s, "solid.combine", json!({"target": "Mold", "tools": ["Tool"], "operation": "cut", "keep_tools": true, "name": "KeepCut"}));
+    assert!(s.model.state().body("Tool").is_some(), "keep_tools preserves the tool");
+    // Dedicated cavity path on a fresh mold also keeps the prototype.
+    let mut cavity = Session::default();
+    run(&mut cavity, "solid.box", json!({"length": 24, "width": 18, "height": 10, "body_name": "Proto"}));
+    run(&mut cavity, "mold.box", json!({"body": "Proto", "margin": "5", "body_name": "Mold"}));
+    run(&mut cavity, "mold.cavity", json!({"mold": "Mold", "tool": "Proto"}));
+    assert!(cavity.model.state().body("Proto").is_some());
+    let split = run(&mut cavity, "mold.split", json!({"body": "Mold", "body_names": ["Lower", "Upper"]}));
+    let lower = split["parting"]["lower"].as_str().unwrap_or("Lower").to_string();
+    let upper = split["parting"]["upper"].as_str().unwrap_or("Upper").to_string();
+    assert!(cavity.model.state().body(&lower).is_some() && cavity.model.state().body(&upper).is_some(), "{split}");
+    run(&mut cavity, "mold.alignment_pins", json!({"upper": upper, "lower": lower.clone(), "diameter": "3", "depth": "3"}));
+    run(&mut cavity, "mold.pour_spout", json!({"body": lower, "width": "5", "depth": "6"}));
+    assert!(cavity.model.state().body("Proto").is_some());
+    assert_consistent(&cavity);
+    assert_consistent(&s);
+}
+
+/// Day 24: sheet flange → edge flange → unfold → flat pattern DXF with bend layers.
+#[test]
+fn wf_day24_sheet_flange_unfold_and_flat_dxf() {
+    let mut s = Session::default();
+    run(&mut s, "sheet.manage_rules", json!({"name": "Steel", "thickness": "1 mm", "bend_radius": "1 mm", "active": true}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [80, 50]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sheet.flange", json!({"sketch": "Base", "rule": "Steel", "body_name": "Bracket"}));
+    let folded = body_volume(&mut s, "Bracket");
+    assert!(folded.is_finite() && folded > 100.0, "{folded}");
+    run(&mut s, "sheet.flange", json!({"edges": [[40, 0, 1.0]], "height": "20 mm", "angle": "90 deg", "body": "Bracket"}));
+    let with_flange = body_volume(&mut s, "Bracket");
+    assert!(with_flange > folded, "{folded} -> {with_flange}");
+    let flat = run(&mut s, "sheet.flat_pattern", json!({"body": "Bracket"}));
+    assert!(flat["bends"].as_array().is_some_and(|b| !b.is_empty()) || flat["bend_lines"].as_array().is_some_and(|b| !b.is_empty()), "{flat}");
+    let dxf = run(&mut s, "sheet.export_dxf", json!({"body": "Bracket"}));
+    let text = dxf["dxf"].as_str().unwrap_or("");
+    assert!(text.contains("OUTLINE"), "{dxf}");
+    assert!(text.contains("BEND_UP") || text.contains("BEND_DOWN") || text.contains("BEND"), "{dxf}");
+    let layers = dxf["layers"].as_array().cloned().unwrap_or_default();
+    assert!(layers.iter().any(|l| l == "OUTLINE"), "layers {layers:?}");
+    assert!(layers.iter().any(|l| l == "BEND_UP" || l == "BEND_DOWN"), "layers {layers:?}");
+    run(&mut s, "sheet.unfold", json!({"body": "Bracket"}));
+    run(&mut s, "sheet.refold", json!({"body": "Bracket"}));
+    assert_consistent(&s);
+}
+
 fn occurrence(s: &Session, component: &str) -> u64 {
     let id = s.doc.find_component(component).unwrap_or(0);
     s.doc.occurrence_of(id).map(|o| o.id).unwrap_or(0)
@@ -277,11 +349,158 @@ fn req_13_7_calibrated_canvas_revolve_and_shell() {
     let hollow = body_volume(&mut s, "Vessel");
     assert!(hollow.is_finite() && hollow > 1.0 && hollow < spun, "{spun} -> {hollow}");
 
-    run(&mut s, "appearance.assign", json!({"bodies": ["Vessel"], "color": "#7eb6d6", "opacity": 0.35}));
+    run(&mut s, "appearance.assign", json!({"bodies": ["Vessel"], "appearance": "Glass - Clear"}));
     let look = run(&mut s, "appearance.list", json!({"body": "Vessel"}));
     let opacity = look["body"]["appearance"]["opacity"].as_f64().unwrap_or(f64::NAN);
-    assert!((opacity - 0.35).abs() < 1e-9, "{look}");
+    assert!(opacity < 0.5, "glass must be transparent: {look}");
+    assert_eq!(look["body"]["appearance"]["name"], "Glass - Clear");
     assert_consistent(&s);
+}
+
+/// Year 1 / PDF Day 25: open surface create, patch, trim/untrim, stitch gaps, thicken volume.
+#[test]
+fn wf_day25_surface() {
+    let mut s = Session::default();
+
+    // Open extrude of a closed rectangle: four walls, no caps, zero volume.
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Wall"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [20, 10]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "surface.extrude", json!({"sketch": "Wall", "distance": 8, "body_name": "Tube"}));
+    let tube = s.world_state().body("Tube").expect("Tube").body.clone();
+    assert!(tube.is_surface());
+    assert_eq!(tube.face_count(), 4, "four walls and no caps");
+    let tube_m = solidcraft_kernel::measure(&tube).unwrap();
+    assert!(tube_m.volume.abs() < 1e-3, "{}", tube_m.volume);
+    assert!((tube_m.area - 480.0).abs() < 2.0, "{}", tube_m.area);
+
+    // Open revolve of a line about Y.
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Spoke"}));
+    run(&mut s, "sketch.line", json!({"points": [[15, 0], [15, 6]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "surface.revolve", json!({"sketch": "Spoke", "axis": "y", "angle": "90 deg", "body_name": "Band"}));
+    let band = s.world_state().body("Band").expect("Band").body.clone();
+    assert!(band.is_surface());
+    let band_area = solidcraft_kernel::measure(&band).unwrap().area;
+    let want_band = std::f64::consts::FRAC_PI_2 * 15.0 * 6.0;
+    assert!(rel(band_area, want_band) < 0.05, "{band_area} vs {want_band}");
+
+    // Open sweep and loft.
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Prof"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [6, 0]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Path"}));
+    let path = run(&mut s, "sketch.line", json!({"points": [[0, 0], [0, 10]]}))["curves"][0].as_str().unwrap().to_string();
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "surface.sweep", json!({"sketch": "Prof", "path_sketch": "Path", "path": [path], "body_name": "Ribbon"}));
+    assert!(s.world_state().body("Ribbon").expect("Ribbon").body.is_surface());
+
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "LoftA"}));
+    run(&mut s, "sketch.line", json!({"points": [[40, 0], [50, 0]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "LoftB"}));
+    run(&mut s, "sketch.line", json!({"points": [[40, 8], [50, 8]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "surface.loft", json!({"sections": [{"sketch": "LoftA"}, {"sketch": "LoftB"}], "body_name": "Ruled"}));
+    let ruled = s.world_state().body("Ruled").expect("Ruled").body.clone();
+    assert!(ruled.is_surface());
+    assert!((solidcraft_kernel::measure(&ruled).unwrap().area - 80.0).abs() < 2.0);
+
+    // Patch → curve trim → untrim restores area; second patch → stitch reports gaps; thicken volume.
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Pad"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [10, 10]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "surface.patch", json!({"sketch": "Pad", "body_name": "Sheet"}));
+    let sheet0 = solidcraft_kernel::measure(&s.world_state().body("Sheet").unwrap().body).unwrap().area;
+    assert!((sheet0 - 100.0).abs() < 1e-3, "{sheet0}");
+
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Cut"}));
+    let curve = run(&mut s, "sketch.line", json!({"points": [[4, 0], [4, 10]]}))["curves"][0].as_str().unwrap().to_string();
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "surface.trim", json!({"body": "Sheet", "sketch": "Cut", "curve": curve, "keep": [8, 5, 0]}));
+    let trimmed = solidcraft_kernel::measure(&s.world_state().body("Sheet").unwrap().body).unwrap().area;
+    assert!((trimmed - 60.0).abs() < 1.0, "{trimmed}");
+    run(&mut s, "surface.untrim", json!({"body": "Sheet"}));
+    let restored = solidcraft_kernel::measure(&s.world_state().body("Sheet").unwrap().body).unwrap().area;
+    assert!((restored - 100.0).abs() < 1e-3, "{restored}");
+
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Other"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [30, 0], "p1": [40, 10]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "surface.patch", json!({"sketch": "Other", "body_name": "Sheet2"}));
+    // Thicken before stitch: stitch consumes Sheet2 into Sheet.
+    run(&mut s, "surface.thicken", json!({"bodies": ["Sheet2"], "thickness": "2 mm", "body_name": "Slab"}));
+    let slab_vol = solidcraft_kernel::measure(&s.world_state().body("Slab").unwrap().body).unwrap().volume.abs();
+    assert!((slab_vol - 200.0).abs() < 1e-2, "{slab_vol}");
+    let stitched = run(&mut s, "surface.stitch", json!({"bodies": ["Sheet", "Sheet2"], "tolerance": "0.01 mm"}));
+    assert_eq!(stitched["closed"], json!(false), "{stitched}");
+    assert!(stitched["gaps"].as_array().is_some_and(|g| !g.is_empty()), "{stitched}");
+    assert!(stitched["gap_edges"].as_array().is_some_and(|g| !g.is_empty()), "{stitched}");
+
+    // Mixed sketch + hole and a guided lift stay on the timeline.
+    run(&mut s, "surface.patch", json!({"sketch": "Pad", "edges": [[2, 2, 0], [4, 2, 0], [4, 4, 0], [2, 4, 0]], "body_name": "WithHole"}));
+    let hole_area = solidcraft_kernel::measure(&s.world_state().body("WithHole").unwrap().body).unwrap().area;
+    assert!((hole_area - 96.0).abs() < 1e-2, "{hole_area}");
+    run(&mut s, "surface.patch", json!({"sketch": "Pad", "guide": [[0, 5, 0], [5, 5, 3], [10, 5, 0]], "body_name": "Tent"}));
+    assert!(s.world_state().body("Tent").unwrap().body.tessellate(0.2).unwrap().bounds().max.z > 1.0);
+
+    assert_consistent(&s);
+}
+
+/// Year 2 / PDF Day 29: associative drawing views, BOM/balloons, title block, standards, export.
+#[test]
+fn wf_day29_drawing() {
+    let mut s = Session::default();
+    run(&mut s, "parameters.add", json!({"name": "height", "expression": "12 mm", "unit": "mm"}));
+    run(&mut s, "solid.box", json!({"length": 40, "width": 20, "height": "height", "name": "Block", "body_name": "Block"}));
+    run(&mut s, "component.create", json!({"name": "Base"}));
+    run(&mut s, "component.create", json!({"name": "Lid"}));
+    run(&mut s, "drawing.create", json!({"name": "Sheet1"}));
+    run(&mut s, "drawing.standard", json!({"standard": "third_angle", "arrows": "filled"}));
+    run(&mut s, "drawing.base_view", json!({"direction": [0, 0, -1], "origin": [0, 0], "hidden": true}));
+    run(&mut s, "drawing.project", json!({"from": 0, "side": "right", "origin": [60, 0]}));
+    run(&mut s, "drawing.section", json!({"direction": [1, 0, 0], "origin": [0, 50]}));
+    run(&mut s, "drawing.detail", json!({"from": 0, "scale": 2, "center": [0, 0], "radius": 15, "origin": [120, 0]}));
+    run(&mut s, "drawing.dimension", json!({"body": "Block", "axis": "z", "at": [0, -20]}));
+    run(&mut s, "drawing.center_mark", json!({"body": "Block"}));
+    let list = run(&mut s, "drawing.parts_list", json!({}));
+    assert_eq!(list["rows"], 2, "{list}");
+    let balloon = run(&mut s, "drawing.balloon", json!({"component": "Lid", "at": [30, 30]}));
+    assert_eq!(balloon["lost"], false);
+    assert!(balloon["item"].as_u64().unwrap_or(0) >= 1, "{balloon}");
+    run(
+        &mut s,
+        "drawing.title_block",
+        json!({"title": "Day29 Bracket", "size": "A4", "template": "iso", "revision": "A", "drawn": "SolidCraft", "date": "2026-10-28"}),
+    );
+    run(&mut s, "parameters.change", json!({"name": "height", "expression": "18 mm"}));
+    let note = s.doc.drawings[0].notes.iter().find(|n| n.kind == "dimension").expect("dimension");
+    assert!((note.measured - 18.0).abs() < 0.25, "{note:?}");
+    assert!(!note.lost);
+    assert!(!s.doc.drawings[0].views[0].curves.is_empty());
+    assert!(s.doc.drawings[0].views[2].curves.iter().any(|c| c.section));
+    assert!(!s.doc.drawings[0].views[3].curves.is_empty());
+
+    let dir = std::env::temp_dir();
+    let dxf_path = dir.join(format!("solidcraft-day29-{}.dxf", std::process::id()));
+    let pdf_path = dir.join(format!("solidcraft-day29-{}.pdf", std::process::id()));
+    let svg = run(&mut s, "drawing.export_svg", json!({}));
+    assert!(svg["svg"].as_str().unwrap_or("").contains("Day29 Bracket"), "{svg}");
+    assert!(svg["lost"].as_array().unwrap().is_empty(), "{svg}");
+    run(&mut s, "drawing.export_dxf", json!({"path": dxf_path.to_string_lossy()}));
+    run(&mut s, "drawing.export_pdf", json!({"path": pdf_path.to_string_lossy()}));
+    let pdf = std::fs::read_to_string(&pdf_path).unwrap();
+    assert!(pdf.contains("%PDF-1.4") && pdf.contains("/Title (Day29 Bracket)"), "{pdf}");
+
+    run(&mut s, "component.activate", json!({"component": 0}));
+    run(&mut s, "component.delete", json!({"component": "Lid"}));
+    let balloon_note = s.doc.drawings[0].notes.iter().find(|n| n.kind == "balloon").expect("balloon");
+    assert!(balloon_note.lost, "{balloon_note:?}");
+    let lost = run(&mut s, "drawing.export_svg", json!({}));
+    assert!(lost["lost"].as_array().unwrap().iter().any(|n| n == "Lid"), "{lost}");
+    assert_consistent(&s);
+    let _ = std::fs::remove_file(dxf_path);
+    let _ = std::fs::remove_file(pdf_path);
 }
 
 /// Every scene in `examples/demo/feature_tour.json` runs to completion. The README recording

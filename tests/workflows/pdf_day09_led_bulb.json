@@ -1,0 +1,96 @@
+{
+  "id": "pdf_day09_led_bulb",
+  "day": 9,
+  "title": "LED bulb",
+  "description": "Revolve envelope, sphere join, coil, cosmetic thread on a cylinder.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XZ",
+        "name": "Envelope"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          4,
+          0
+        ],
+        "p1": [
+          12,
+          20
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.revolve",
+      "params": {
+        "sketch": "Envelope",
+        "axis": "Z",
+        "angle": "360 deg",
+        "body_name": "Bulb"
+      }
+    },
+    {
+      "command": "solid.sphere",
+      "params": {
+        "diameter": 24,
+        "center": [
+          0,
+          0,
+          28
+        ],
+        "operation": "join",
+        "targets": [
+          "Bulb"
+        ]
+      }
+    },
+    {
+      "command": "solid.coil",
+      "params": {
+        "diameter": 20,
+        "revolutions": 3,
+        "pitch": 4,
+        "section_size": 1.5,
+        "name": "Filament"
+      }
+    },
+    {
+      "command": "solid.cylinder",
+      "params": {
+        "radius": 5,
+        "height": 10,
+        "base": [
+          0,
+          0,
+          -10
+        ],
+        "body_name": "Base"
+      }
+    },
+    {
+      "command": "solid.thread",
+      "params": {
+        "face": [
+          5,
+          0,
+          -5
+        ],
+        "designation": "M10",
+        "length": "8 mm"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

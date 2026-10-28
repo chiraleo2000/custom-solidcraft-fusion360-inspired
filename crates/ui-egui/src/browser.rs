@@ -1027,6 +1027,13 @@ fn canvas_panel(app: &mut SolveApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::Grid::new("sc_canvas_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                 if m.calibrate {
+                    ui.label("");
+                    ui.label(
+                        RichText::new("Two points on the canvas and their true length (1:1 when they match).")
+                            .color(Tokens::get().text_dim)
+                            .size(11.0),
+                    );
+                    ui.end_row();
                     for (label, p) in [("Point A", &mut m.a), ("Point B", &mut m.b)] {
                         ui.label(label);
                         ui.horizontal(|ui| {
@@ -1035,9 +1042,26 @@ fn canvas_panel(app: &mut SolveApp, ctx: &egui::Context) {
                         });
                         ui.end_row();
                     }
-                    ui.label("Distance");
+                    ui.label("True distance");
                     ui.add(crate::prefs::length_drag(&mut m.distance, &app.session.doc.units, app.preferences.length_decimals).range(0.001..=1e6));
                     ui.end_row();
+                    let span = ((m.b[0] - m.a[0]).hypot(m.b[1] - m.a[1])).max(1e-9);
+                    let scale = m.distance / span;
+                    ui.label("Scale");
+                    ui.label(format!("{scale:.4}×  (1.0000× is 1:1)"));
+                    ui.end_row();
+                    if (scale - 1.0).abs() > 1e-6 {
+                        ui.label("");
+                        if ui
+                            .button("Set points for 1:1")
+                            .on_hover_text("Keep the true distance; place A and B that far apart on the canvas")
+                            .clicked()
+                        {
+                            m.a = [c.center.x - m.distance / 2.0, c.center.y];
+                            m.b = [c.center.x + m.distance / 2.0, c.center.y];
+                        }
+                        ui.end_row();
+                    }
                 } else {
                     let (mut x, mut y, mut w, mut ang, mut op, mut flip) = (c.center.x, c.center.y, c.width, c.angle.to_degrees(), c.opacity, c.flip);
                     ui.label("Center X");

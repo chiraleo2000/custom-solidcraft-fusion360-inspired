@@ -235,6 +235,86 @@ fn thread_on(st: &ModelState, feature: u64, p: Vec3, designation: Option<&str>, 
     })
 }
 
+/// Cosmetic thread for a hole we just cut. Countersink/counterbore booleans often leave the
+/// wall unclassified as a cylinder near the mouth, so try several wall samples then fall back
+/// to the hole's own axis and depth.
+fn hole_wall_thread(
+    st: &ModelState,
+    feature: u64,
+    spot: Vec3,
+    dir: Vec3,
+    radius: f64,
+    mouth: f64,
+    hole_depth: Option<f64>,
+    designation: &str,
+    length: Option<f64>,
+    offset: Option<f64>,
+) -> Result<ThreadInfo> {
+    let radial = dir.any_perp();
+    let depth_cap = hole_depth.unwrap_or(radius * 40.0).max(mouth + radius);
+    let mut last = DocError::Invalid("not supported yet: a thread on a face that is not a cylinder".into());
+    for k in 0..16 {
+        let along = mouth + radius * (0.75 + 0.5 * k as f64);
+        if along > depth_cap - radius * 0.1 {
+            break;
+        }
+        for scale in [1.0, 0.98, 1.02] {
+            let wall = spot + radial * (radius * scale) + dir * along;
+            match thread_on(st, feature, wall, Some(designation), length, offset) {
+                Ok(t) => return Ok(t),
+                Err(e) => last = e,
+            }
+        }
+    }
+    // Fallback: CSK/CBORE can leave no classifiable cylinder; the hole parameters are enough
+    // for a cosmetic thread.
+    let (major, pitch) =
+        parse_metric_thread(designation).ok_or_else(|| DocError::Invalid(format!("unknown thread `{designation}` (ISO metric, like M8 or M8x1)")))?;
+    let dia = radius * 2.0;
+    let fits = (major - pitch * 1.0825 - dia).abs() < 0.2 * major || (major - pitch - dia).abs() < 0.15 * major;
+    if !fits {
+        return Err(last);
+    }
+    let off = offset.unwrap_or(0.0);
+    if !(off.is_finite() && off >= 0.0) {
+        return Err(DocError::Invalid("thread offset must be zero or positive".into()));
+    }
+    if let Some(l) = length
+        && !(l.is_finite() && l > 0.0)
+    {
+        return Err(DocError::Invalid("thread length must be positive".into()));
+    }
+    let in_material = spot + radial * (radius + 0.5_f64.max(radius * 0.1)) + dir * (mouth + radius).min(depth_cap * 0.5);
+    let body = st
+        .bodies
+        .iter()
+        .find(|b| b.body.contains(in_material))
+        .or_else(|| st.bodies.first())
+        .ok_or_else(|| DocError::Invalid("no body for the hole thread".into()))?
+        .name
+        .clone();
+    let start = mouth + off;
+    let end = match length {
+        Some(l) => (start + l).min(depth_cap),
+        None => depth_cap,
+    };
+    if !(end - start > 1e-6) {
+        return Err(DocError::Invalid("the thread offset leaves nothing on the face".into()));
+    }
+    Ok(ThreadInfo {
+        feature,
+        body,
+        designation: format_thread(major, pitch),
+        major_diameter: major,
+        pitch,
+        internal: true,
+        axis_point: spot,
+        axis: dir,
+        start,
+        end,
+    })
+}
+
 /// The helical space between the teeth of a modelled ISO metric thread (ISO 68-1 basic
 /// profile, 60° flanks): cut from the shaft (external) or the hole wall (internal), running from
 /// `start` to `end` along the axis. `radius` is the face's own radius; `open` says which ends
@@ -2419,20 +2499,34 @@ fn feature_tools_with_constructor(
             };
             if let Some(tp) = &extent.taper {
                 let taper = val(vals, tp, Kind::Angle)?;
-                if extent.distance2.is_some() || extent.start_offset.is_some() || extent.direction == crate::Direction::Symmetric {
-                    return Err(DocError::Invalid("not supported yet: taper with two-sided, symmetric or offset extents".into()));
+                if extent.start_offset.is_some() {
+                    return Err(DocError::Invalid("not supported yet: taper with a start offset".into()));
                 }
-                let sign = if extent.to.is_none() && extent.direction == crate::Direction::Negative { -1.0 } else { 1.0 };
-                let (len, sign) = if d < 0.0 { (-d, -sign) } else { (d, sign) };
                 let start_plane = ss.plane.offset(from);
-                let caps = [
-                    Some(crate::lineage::extrude_cap_role(from)),
-                    Some(crate::lineage::extrude_cap_role(if sign < 0.0 { from - len } else { from + len })),
-                ];
+                let (pos, neg) = match (&extent.distance2, extent.direction) {
+                    (Some(d2), _) => {
+                        let other = val(vals, d2, Kind::Length)?.abs();
+                        let here = d.abs();
+                        (here, other)
+                    }
+                    (None, crate::Direction::Symmetric) => (d.abs(), d.abs()),
+                    (None, crate::Direction::Negative) => (0.0, d.abs()),
+                    (None, _) => (d.abs(), 0.0),
+                };
+                if pos <= 1e-9 && neg <= 1e-9 {
+                    return Err(DocError::Invalid("extrude distance is zero".into()));
+                }
+                let caps = [Some(crate::lineage::extrude_cap_role(from - neg)), Some(crate::lineage::extrude_cap_role(from + pos))];
                 return regions
                     .iter()
                     .map(|r| {
-                        let body = kernel::extrude_tapered(&start_plane, r, len, sign, taper)?;
+                        let body = if neg > 1e-9 && pos > 1e-9 {
+                            kernel::extrude_tapered_both(&start_plane, r, pos, neg, taper)?
+                        } else if neg > 1e-9 {
+                            kernel::extrude_tapered(&start_plane, r, neg, -1.0, taper)?
+                        } else {
+                            kernel::extrude_tapered(&start_plane, r, pos, 1.0, taper)?
+                        };
                         Ok(crate::lineage::ProfileRoles { sketch: Some(&ss), region: Some(r), caps: caps.clone() }.tool(body, None))
                     })
                     .collect();
@@ -2673,10 +2767,16 @@ fn feature_tools_with_constructor(
             regions.iter().zip(bodies).map(|(r, body)| Ok(tool(r, kernel::transform_matrix(&body, m)?, Some(&body)))).collect()
         }
         FeatureKind::Loft { sections, rails, operation, open: true, .. } => open_loft_sheet(st, sections, rails, operation),
-        FeatureKind::Loft { sections, .. } if sections.iter().any(|s| s.point.is_some()) => {
+        FeatureKind::Loft { sections, rails, guide, .. } if sections.iter().any(|s| s.point.is_some()) => {
+            if rails.is_some() || guide.is_some() {
+                return Err(DocError::Invalid("not supported yet: a guide rail on a loft to a point".into()));
+            }
             // A profile lofted to a sketch point (an apex).
             let [a, b] = &sections[..] else { return Err(DocError::Invalid("not supported yet: a point section in a loft of more than two".into())) };
             let (prof, pt) = if a.point.is_some() { (b, a) } else { (a, b) };
+            if prof.point.is_some() {
+                return Err(DocError::Invalid("a loft to a point needs one profile section and one point".into()));
+            }
             let ss = st.sketch(prof.sketch).ok_or_else(|| DocError::Unknown(format!("sketch {}", prof.sketch)))?;
             let regions = solidcraft_sketch::merge_regions(&select_profiles(ss, &prof.profiles)?);
             let [r] = &regions[..] else { return Err(DocError::Invalid("each loft section must be one profile".into())) };
@@ -2990,13 +3090,34 @@ fn guide_sections(
     let axis = (c1 - c0).normalized().ok_or_else(|| DocError::Invalid("the loft sections are in the same place".into()))?;
     let span = c0.dist(c1);
     let tol = (span * 1e-3).max(0.5);
-    let near = |plane: &Plane| rail.iter().any(|p| plane.height(*p).abs() < tol);
-    if !(near(p0) && near(p1)) {
+    // A rail must meet each section near its profile, not merely pierce the section plane
+    // far away (that used to scale the loft out to a stray guide).
+    let near_profile = |plane: &Plane, lp: &solidcraft_geom::Loop2, pts: &[Vec3]| -> bool {
+        let poly = lp.polyline(0.05);
+        if poly.len() < 2 {
+            return false;
+        }
+        pts.iter().any(|p| {
+            if plane.height(*p).abs() >= tol {
+                return false;
+            }
+            let q = plane.to_local(*p);
+            let mut best = f64::INFINITY;
+            for i in 0..poly.len() {
+                let (Some(a), Some(b)) = (poly.get(i), poly.get((i + 1) % poly.len())) else { continue };
+                let ab = *b - *a;
+                let l2 = ab.len2();
+                let t = if l2 > 0.0 { ((q - *a).dot(ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                best = best.min(q.dist(*a + ab * t));
+            }
+            best < tol.max(1.0)
+        })
+    };
+    if !(near_profile(p0, l0, rail) && near_profile(p1, l1, rail)) {
         return Err(DocError::Invalid("the loft rail misses a section".into()));
     }
     if let Some(other) = second {
-        let near_other = |plane: &Plane| other.iter().any(|p| plane.height(*p).abs() < tol);
-        if other.len() < 2 || !(near_other(p0) && near_other(p1)) {
+        if other.len() < 2 || !(near_profile(p0, l0, other) && near_profile(p1, l1, other)) {
             return Err(DocError::Invalid("the loft rail misses a section".into()));
         }
     }
@@ -3936,13 +4057,21 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             apply_traced(st, f, tools, *operation, targets)
         }
-        FeatureKind::Hole { thread, diameter, thread_offset, thread_length, .. } => {
+        FeatureKind::Hole { thread, diameter, thread_offset, thread_length, hole, depth, .. } => {
             let (spots, dir) = hole_spots(st, f)?;
             let tools = feature_tools(doc, vals, f, st)?;
             apply_op(st, f, tools, Operation::Cut, &[])?;
             if let Some(d) = thread {
-                // A point on each hole's wall, a little below the entry.
+                // A point on each hole's cylindrical wall, past any countersink/counterbore.
                 let r = val(vals, diameter, Kind::Length)? / 2.0;
+                let mouth = match hole {
+                    HoleKind::Countersink { cs_diameter, cs_angle } => {
+                        let (rc, half) = (val(vals, cs_diameter, Kind::Length)? / 2.0, val(vals, cs_angle, Kind::Angle)? / 2.0);
+                        if half > 1e-3 && half < std::f64::consts::FRAC_PI_2 && rc > r { (rc - r) / half.tan() } else { 0.0 }
+                    }
+                    HoleKind::Counterbore { cb_depth, .. } => val(vals, cb_depth, Kind::Length)?.max(0.0),
+                    _ => 0.0,
+                };
                 let off = match thread_offset {
                     Some(e) => Some(val(vals, e, Kind::Length)?),
                     None => None,
@@ -3951,9 +4080,12 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                     Some(e) => Some(val(vals, e, Kind::Length)?),
                     None => None,
                 };
+                let hole_depth = match depth {
+                    Some(e) => Some(val(vals, e, Kind::Length)?),
+                    None => None,
+                };
                 for p in spots {
-                    let wall = p + dir.any_perp() * r + dir * (r * 0.5);
-                    let t = thread_on(st, f.id, wall, Some(d), len, off)?;
+                    let t = hole_wall_thread(st, f.id, p, dir, r, mouth, hole_depth, d, len, off)?;
                     st.threads.push(t);
                 }
             }
@@ -4502,37 +4634,49 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
         }
         FeatureKind::Form { shape, length, width, thickness, pulls, edits, symmetry, creases, finished } => {
             let (l, w, t) = (val(vals, length, Kind::Length)?, val(vals, width, Kind::Length)?, val(vals, thickness, Kind::Length)?);
+            if edits.len() > crate::MAX_FORM_EDITS {
+                return Err(DocError::Invalid("not supported yet: cage too large".into()));
+            }
             let mut build = kernel::FormBuild {
                 pulls: pulls.iter().map(|p| (p.index, p.delta)).collect(),
-                creases: creases.clone(),
+                creases: Vec::new(),
                 symmetry: symmetry.clone(),
                 ..kernel::FormBuild::default()
             };
+            // Feature `creases` store cage edge refs; the sheet builder wants control-point indices.
+            for edge in creases {
+                let (a, b) = kernel::edge_ends(edge.0).map_err(|_| DocError::Invalid("a crease names an edge outside the cage".into()))?;
+                build.creases.push(a as u32);
+                build.creases.push(b as u32);
+            }
             for edit in edits {
                 match edit {
-                    crate::FormEdit::MovePoint { index, delta } => build.pulls.push((*index, *delta)),
-                    crate::FormEdit::InsertEdge { index } => build.separate_edges.push(*index),
-                    crate::FormEdit::InsertPoint { index } => build.pulls.push((*index, Vec3::new(0.0, 0.0, 0.25))),
+                    crate::FormEdit::MovePoint { index, delta } => build.pulls.push((index.0, *delta)),
+                    crate::FormEdit::InsertEdge { index } => build.separate_edges.push(index.0),
+                    crate::FormEdit::InsertPoint { .. } => {
+                        return Err(DocError::Invalid("not supported yet: inserting a control point into the quad cage".into()));
+                    }
                     crate::FormEdit::Subdivide { level } => {
-                        if *level > 6 {
+                        if *level > kernel::MAX_SUBDIV_LEVEL {
                             return Err(DocError::Invalid("subdivision level is at most 6".into()));
                         }
-                        build.subdiv = build.subdiv.saturating_add(*level).min(6);
+                        build.subdiv = build.subdiv.saturating_add(*level).min(kernel::MAX_SUBDIV_LEVEL);
+                        let _ = kernel::cage_points(build.subdiv)?;
                     }
                     crate::FormEdit::Bridge { a, b } => {
-                        build.pulls.push((*a, Vec3::new(0.15, 0.0, 0.15)));
-                        build.pulls.push((*b, Vec3::new(-0.15, 0.0, 0.15)));
+                        let (da, db) = kernel::bridge_deltas(shape, l, w, &build.pulls, a.0, b.0)?;
+                        build.pulls.push((a.0, da));
+                        build.pulls.push((b.0, db));
                     }
-                    crate::FormEdit::Weld { index } => build.pulls.push((*index, Vec3::new(0.0, 0.0, -0.05))),
+                    crate::FormEdit::Weld { .. } => {
+                        return Err(DocError::Invalid("not supported yet: welding a form control point".into()));
+                    }
                     crate::FormEdit::Crease { index } => {
-                        if let Ok((a, b)) = kernel::edge_ends(*index) {
-                            build.creases.push(a as u32);
-                            build.creases.push(b as u32);
-                        } else {
-                            return Err(DocError::Invalid("a crease names an edge outside the cage".into()));
-                        }
+                        let (a, b) = kernel::edge_ends(index.0).map_err(|_| DocError::Invalid("a crease names an edge outside the cage".into()))?;
+                        build.creases.push(a as u32);
+                        build.creases.push(b as u32);
                     }
-                    crate::FormEdit::ExtrudeFace { index, delta } => build.pulls.push((*index, *delta)),
+                    crate::FormEdit::ExtrudeFace { index, delta } => build.pulls.push((index.0, *delta)),
                 }
             }
             let thickness = if finished.as_deref() == Some("surface") { 0.0 } else { t };
@@ -4673,7 +4817,8 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             if !(m.is_finite() && (0.0..1.0e5).contains(&m)) {
                 return Err(DocError::Invalid("the mold margin must be zero or a positive length".into()));
             }
-            let mb = st.bodies.iter().find(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            // Clone so `unique_body_name` / `push` can borrow `st` mutably afterward.
+            let mb = st.bodies.iter().find(|b| &b.name == body).cloned().ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let bb = mb.mesh().bounds();
             if bb.is_empty() {
                 return Err(DocError::Invalid("the prototype has no size".into()));
@@ -4707,14 +4852,34 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             if parts.len() < 2 {
                 return Err(DocError::Invalid("the plane does not split the mold".into()));
             }
-            let input = mb.traced();
-            let mut it = parts.into_iter().map(|part| Traced::step(part, &[&input]));
-            if let (Some(first), Some(slot)) = (it.next(), st.bodies.get_mut(i)) {
-                *slot = ModelBody::traced_new(mb.name.clone(), first, mb.feature);
+            // Order halves so the piece below/behind the parting plane is first (Lower), then Upper.
+            let mut ranked: Vec<(f64, Body)> = Vec::with_capacity(parts.len());
+            for part in parts {
+                let side = match kernel::measure(&part) {
+                    Ok(m) => (m.centroid - pl.origin).dot(pl.normal()),
+                    Err(_) => {
+                        let mesh = part.display_mesh((part.size() * 1e-3).max(1e-3)).unwrap_or_default();
+                        (mesh.bounds().center() - pl.origin).dot(pl.normal())
+                    }
+                };
+                ranked.push((side, part));
             }
-            for (k, part) in it.enumerate() {
-                let name = unique_body_name(st, f.body_names.get(k + 1).map(String::as_str).unwrap_or("MoldHalf"));
-                st.bodies.push(ModelBody::traced_new(name, part, f.id));
+            ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let input = mb.traced();
+            let defaults = ["MoldLower", "MoldUpper"];
+            for (k, (_, part)) in ranked.into_iter().enumerate() {
+                let traced = Traced::step(part, &[&input]);
+                let hint = f.body_names.get(k).map(String::as_str).unwrap_or(defaults.get(k).copied().unwrap_or("MoldHalf"));
+                if k == 0 {
+                    // Keep the authored mold name on the lower half unless the user named both.
+                    let name = if f.body_names.first().is_some_and(|n| !n.trim().is_empty()) { unique_body_name(st, hint) } else { mb.name.clone() };
+                    if let Some(slot) = st.bodies.get_mut(i) {
+                        *slot = ModelBody::traced_new(name, traced, mb.feature);
+                    }
+                } else {
+                    let name = unique_body_name(st, hint);
+                    st.bodies.push(ModelBody::traced_new(name, traced, f.id));
+                }
             }
             Ok(())
         }
@@ -4730,18 +4895,29 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             let ub = st.body(upper).cloned().ok_or_else(|| DocError::Unknown(format!("body `{upper}`")))?;
             let lb = st.body(lower).cloned().ok_or_else(|| DocError::Unknown(format!("body `{lower}`")))?;
-            let bb = ub.mesh().bounds();
+            let ubb = ub.mesh().bounds();
+            let lbb = lb.mesh().bounds();
+            // Parting interface: XY overlap of the two halves, seam at the facing Z.
+            let min_x = ubb.min.x.max(lbb.min.x);
+            let max_x = ubb.max.x.min(lbb.max.x);
+            let min_y = ubb.min.y.max(lbb.min.y);
+            let max_y = ubb.max.y.min(lbb.max.y);
             let inset = radius * 2.0;
-            if bb.is_empty() || bb.max.x - bb.min.x <= inset * 2.0 || bb.max.y - bb.min.y <= inset * 2.0 {
-                return Err(DocError::Invalid("the mold face is smaller than the pins".into()));
+            if ubb.is_empty()
+                || lbb.is_empty()
+                || !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite())
+                || max_x - min_x <= inset * 2.0
+                || max_y - min_y <= inset * 2.0
+            {
+                return Err(DocError::Invalid("the mold parting face is smaller than the pins".into()));
             }
-            let seam = lb.mesh().bounds().max.z;
-            let corners = [
-                (bb.min.x + inset, bb.min.y + inset),
-                (bb.max.x - inset, bb.min.y + inset),
-                (bb.max.x - inset, bb.max.y - inset),
-                (bb.min.x + inset, bb.max.y - inset),
-            ];
+            // Prefer the contact between lower top and upper bottom; fall back to either half's face.
+            let seam = if lbb.max.z <= ubb.min.z + 1e-6 { (lbb.max.z + ubb.min.z) * 0.5 } else { lbb.max.z.min(ubb.max.z) };
+            if !seam.is_finite() {
+                return Err(DocError::Invalid("the mold parting height is not finite".into()));
+            }
+            let corners =
+                [(min_x + inset, min_y + inset), (max_x - inset, min_y + inset), (max_x - inset, max_y - inset), (min_x + inset, max_y - inset)];
             let mut upper_body = ub.body.clone();
             let mut lower_body = lb.body.clone();
             for (x, y) in corners {
@@ -4772,12 +4948,17 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let mb = st.bodies.get(i).cloned().ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let bb = mb.mesh().bounds();
-            if bb.is_empty() {
+            if bb.is_empty() || !(bb.min.y.is_finite() && bb.max.y.is_finite()) {
                 return Err(DocError::Invalid("the mold has no size".into()));
             }
+            // Channel from outside the −Y wall into the body; height sits in the middle third so a
+            // mid-height parting still leaves a pour path on at least one half.
+            let z0 = bb.min.z + (bb.max.z - bb.min.z) * 0.35;
+            let z1 = bb.min.z + (bb.max.z - bb.min.z) * 0.65;
+            let half_w = width * 0.5;
             let channel = kernel::box_solid(
-                Vec3::new(bb.center().x - width * 0.5, bb.min.y - depth, bb.center().z - width * 0.5),
-                Vec3::new(bb.center().x + width * 0.5, bb.min.y + depth, bb.center().z + width * 0.5),
+                Vec3::new(bb.center().x - half_w, bb.min.y - depth, z0.min(z1)),
+                Vec3::new(bb.center().x + half_w, bb.min.y + depth, z0.max(z1)),
             )?;
             let cut = kernel::boolean(&mb.body, &channel, BoolOp::Cut)?.ok_or_else(|| DocError::Invalid("the spout misses the mold".into()))?;
             if let Some(slot) = st.bodies.get_mut(i) {
@@ -4810,6 +4991,14 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
         FeatureKind::Nesting { bodies, width, depth, gap } => {
             if bodies.is_empty() || bodies.len() > 256 {
                 return Err(DocError::Invalid("the nest needs 1…256 bodies".into()));
+            }
+            {
+                let mut seen = std::collections::BTreeSet::new();
+                for name in bodies {
+                    if !seen.insert(name.as_str()) {
+                        return Err(DocError::Invalid(format!("`{name}` is listed more than once in the nest")));
+                    }
+                }
             }
             let width = val(vals, width, Kind::Length)?;
             let depth = val(vals, depth, Kind::Length)?;

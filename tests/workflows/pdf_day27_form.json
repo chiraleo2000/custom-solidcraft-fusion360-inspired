@@ -1,0 +1,70 @@
+{
+  "id": "pdf_day27_form",
+  "day": 27,
+  "title": "Form / T-splines smoke",
+  "description": "Create form, edit, insert edge, subdivide, crease, symmetry, finish.",
+  "smoke": true,
+  "commands": [
+    {
+      "command": "form.create",
+      "params": {
+        "shape": "box",
+        "length": 30,
+        "width": 18,
+        "thickness": 0,
+        "name": "Cage"
+      }
+    },
+    {
+      "command": "form.edit_point",
+      "params": {
+        "feature": "Cage",
+        "index": 1,
+        "move": [
+          0,
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "command": "form.insert_edge",
+      "params": {
+        "feature": "Cage",
+        "index": 4
+      }
+    },
+    {
+      "command": "form.subdivide",
+      "params": {
+        "feature": "Cage",
+        "level": 1
+      }
+    },
+    {
+      "command": "form.crease",
+      "params": {
+        "feature": "Cage",
+        "index": 1
+      }
+    },
+    {
+      "command": "form.symmetry",
+      "params": {
+        "feature": "Cage",
+        "plane": "yz"
+      }
+    },
+    {
+      "command": "form.finish",
+      "params": {
+        "feature": "Cage",
+        "mode": "solid"
+      }
+    },
+    {
+      "command": "inspect.measure",
+      "params": {}
+    }
+  ]
+}

@@ -387,6 +387,9 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
                     row_label(ui, "Bends");
                     ui.label(format!("{}", bends.len()));
                     ui.end_row();
+                    row_label(ui, "DXF layers");
+                    ui.label(RichText::new("OUTLINE · BEND_UP · BEND_DOWN (+ POCKET_*)").color(t.text_dim).small());
+                    ui.end_row();
                     for b in bends.iter().take(50) {
                         let up = b["direction"] == "up";
                         let (up_col, down_col) = bend_colors();

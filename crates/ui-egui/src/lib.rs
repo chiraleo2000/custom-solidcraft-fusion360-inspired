@@ -475,6 +475,10 @@ impl SolveApp {
             sketch_palette::apply_mode(self, id, v);
             if id == "ui.quick_toolbox" {
                 self.ui.palette_open = true;
+                if let Some(q) = params.get("query").and_then(Value::as_str) {
+                    self.sbox.text = q.chars().take(200).collect();
+                    self.sbox.index = 0;
+                }
             }
             if id == "view.visual_style" {
                 self.ui.visual_style = self.session.visual_style;

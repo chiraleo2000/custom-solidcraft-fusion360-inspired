@@ -72,6 +72,17 @@ impl SelectFilter {
     }
 }
 
+/// How a single click resolves against overlapping candidates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectMode {
+    /// Nearest permitted entity of any kind.
+    Entity,
+    /// Prefer a body or component; otherwise the nearest permitted pick.
+    Body,
+    /// Frontmost after sorting by ray depth (depth-stack head).
+    Occluded,
+}
+
 /// How a drag result combines with the selection that was already there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectCompose {
@@ -216,6 +227,22 @@ pub fn depth_stack(candidates: &[Pickable], filter: SelectFilter) -> Vec<Pickabl
     out
 }
 
+/// Resolve a click against candidates. Deterministic: same inputs → same pick. Returns only
+/// kinds the filter permits; `None` when nothing qualifies.
+pub fn pick(candidates: &[Pickable], mode: SelectMode, filter: SelectFilter) -> Option<Pickable> {
+    let stack = depth_stack(candidates, filter);
+    match mode {
+        SelectMode::Entity | SelectMode::Occluded => stack.into_iter().next(),
+        SelectMode::Body => {
+            if let Some(body) = stack.iter().copied().find(|p| matches!(p.kind, PickKind::Body | PickKind::Component)) {
+                Some(body)
+            } else {
+                stack.into_iter().next()
+            }
+        }
+    }
+}
+
 /// Apply replace, add, or subtract. Ids stay unique and keep the previous order, with new hits
 /// appended.
 pub fn compose_selection(previous: &[u64], hits: &[u64], mode: SelectCompose) -> Vec<u64> {
@@ -284,14 +311,14 @@ pub fn view_up(dir: [i8; 3]) -> Option<Vec3> {
 mod tests {
     use super::*;
 
-    fn pick(id: u64, kind: PickKind, depth: f64, min: Vec2, max: Vec2) -> Pickable {
+    fn cand(id: u64, kind: PickKind, depth: f64, min: Vec2, max: Vec2) -> Pickable {
         Pickable { id, kind, depth, min, max, anchor: Vec2::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5) }
     }
 
     #[test]
     fn window_drag_direction_changes_what_is_enclosed() {
-        let inside = pick(1, PickKind::Face, 1.0, Vec2::new(1.0, 1.0), Vec2::new(2.0, 2.0));
-        let crossing = pick(2, PickKind::Face, 2.0, Vec2::new(0.0, 0.0), Vec2::new(3.0, 1.5));
+        let inside = cand(1, PickKind::Face, 1.0, Vec2::new(1.0, 1.0), Vec2::new(2.0, 2.0));
+        let crossing = cand(2, PickKind::Face, 2.0, Vec2::new(0.0, 0.0), Vec2::new(3.0, 1.5));
         let c = [inside, crossing];
         let box_min = Vec2::new(0.5, 0.5);
         let box_max = Vec2::new(2.5, 2.5);
@@ -304,8 +331,8 @@ mod tests {
 
     #[test]
     fn filter_drops_other_kinds_and_depth_is_sorted() {
-        let face = pick(1, PickKind::Face, 3.0, Vec2::ZERO, Vec2::new(1.0, 1.0));
-        let edge = pick(2, PickKind::Edge, 1.0, Vec2::ZERO, Vec2::new(1.0, 1.0));
+        let face = cand(1, PickKind::Face, 3.0, Vec2::ZERO, Vec2::new(1.0, 1.0));
+        let edge = cand(2, PickKind::Edge, 1.0, Vec2::ZERO, Vec2::new(1.0, 1.0));
         let filter = SelectFilter { faces: true, edges: false, vertices: false, sketch_curves: false, bodies: false, components: false };
         let stack = depth_stack(&[face, edge], filter);
         assert_eq!(stack.len(), 1);
@@ -317,8 +344,8 @@ mod tests {
 
     #[test]
     fn lasso_and_paint_are_deterministic() {
-        let a = pick(1, PickKind::Body, 0.0, Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0));
-        let b = pick(2, PickKind::Body, 0.0, Vec2::new(5.0, 5.0), Vec2::new(6.0, 6.0));
+        let a = cand(1, PickKind::Body, 0.0, Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0));
+        let b = cand(2, PickKind::Body, 0.0, Vec2::new(5.0, 5.0), Vec2::new(6.0, 6.0));
         let lasso = [Vec2::new(0.0, 0.0), Vec2::new(3.0, 0.0), Vec2::new(3.0, 3.0), Vec2::new(0.0, 3.0)];
         let hit = select_freeform(&lasso, &[b, a], SelectFilter::ALL);
         assert_eq!(hit.iter().map(|p| p.id).collect::<Vec<_>>(), vec![1]);
@@ -340,6 +367,81 @@ mod tests {
                 assert!(up.z.abs() < 1e-9);
             } else {
                 assert!(up.z > 0.0, "{dir:?} up {up:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn pick_respects_mode_and_filter() {
+        let face = cand(1, PickKind::Face, 2.0, Vec2::ZERO, Vec2::new(1.0, 1.0));
+        let body = cand(2, PickKind::Body, 3.0, Vec2::ZERO, Vec2::new(1.0, 1.0));
+        let edge = cand(3, PickKind::Edge, 1.0, Vec2::ZERO, Vec2::new(1.0, 1.0));
+        let all = [face, body, edge];
+        assert_eq!(pick(&all, SelectMode::Entity, SelectFilter::ALL).map(|p| p.id), Some(3));
+        assert_eq!(pick(&all, SelectMode::Occluded, SelectFilter::ALL).map(|p| p.id), Some(3));
+        assert_eq!(pick(&all, SelectMode::Body, SelectFilter::ALL).map(|p| p.id), Some(2));
+        let faces_only = SelectFilter { faces: true, edges: false, vertices: false, sketch_curves: false, bodies: false, components: false };
+        assert_eq!(pick(&all, SelectMode::Entity, faces_only).map(|p| p.id), Some(1));
+        assert_eq!(pick(&all, SelectMode::Body, faces_only).map(|p| p.id), Some(1));
+    }
+
+    /// Feature: fusion360-feature-parity, Property 19: Selection respects mode and filter, deterministically
+    #[test]
+    fn property_19_selection_is_deterministic() {
+        let kinds = [PickKind::Face, PickKind::Edge, PickKind::Vertex, PickKind::Body, PickKind::Component, PickKind::SketchCurve];
+        for n in 0..120u64 {
+            let mut c = Vec::new();
+            for i in 0..6 {
+                let k = kinds[usize::try_from(i).unwrap_or(0) % kinds.len()];
+                let d = ((n + i) % 7) as f64;
+                c.push(cand(n * 10 + i, k, d, Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)));
+            }
+            let filter = if n % 3 == 0 {
+                SelectFilter::ALL
+            } else {
+                SelectFilter { faces: n % 2 == 0, edges: n % 3 == 0, vertices: n % 5 == 0, sketch_curves: false, bodies: true, components: false }
+            };
+            let a = pick(&c, SelectMode::Entity, filter);
+            let b = pick(&c, SelectMode::Entity, filter);
+            assert_eq!(a, b);
+            let stack = depth_stack(&c, filter);
+            if let Some(front) = stack.first() {
+                assert_eq!(pick(&c, SelectMode::Occluded, filter).map(|p| p.id), Some(front.id));
+            }
+            let win = select_window(Vec2::new(-0.5, -0.5), Vec2::new(1.5, 1.5), DragDir::LeftToRight, &c, filter);
+            let win2 = select_window(Vec2::new(-0.5, -0.5), Vec2::new(1.5, 1.5), DragDir::LeftToRight, &c, filter);
+            assert_eq!(win.iter().map(|p| p.id).collect::<Vec<_>>(), win2.iter().map(|p| p.id).collect::<Vec<_>>());
+        }
+    }
+
+    /// Feature: fusion360-feature-parity, Property 25: Drag selection is deterministic
+    #[test]
+    fn property_25_drag_selection_composes() {
+        let a = cand(1, PickKind::Face, 1.0, Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0));
+        let b = cand(2, PickKind::Face, 2.0, Vec2::new(2.0, 2.0), Vec2::new(3.0, 3.0));
+        let c = [a, b];
+        for _ in 0..100 {
+            let hits = select_window(Vec2::new(-0.1, -0.1), Vec2::new(1.1, 1.1), DragDir::LeftToRight, &c, SelectFilter::ALL);
+            let ids: Vec<u64> = hits.iter().map(|p| p.id).collect();
+            assert_eq!(compose_selection(&[], &ids, SelectCompose::Replace), ids);
+            assert_eq!(compose_selection(&[2], &ids, SelectCompose::Add), vec![2, 1]);
+            assert_eq!(compose_selection(&[1, 2], &ids, SelectCompose::Subtract), vec![2]);
+        }
+    }
+
+    /// Feature: fusion360-feature-parity, Property 26: The depth chooser lists candidates ordered by ray depth
+    #[test]
+    fn property_26_depth_stack_orders_and_hides_nothing() {
+        for n in 0..100u64 {
+            let c = [
+                cand(1, PickKind::Face, (n % 5) as f64 + 0.1, Vec2::ZERO, Vec2::new(1.0, 1.0)),
+                cand(2, PickKind::Edge, (n % 7) as f64 + 0.2, Vec2::ZERO, Vec2::new(1.0, 1.0)),
+                cand(3, PickKind::Body, (n % 3) as f64 + 0.3, Vec2::ZERO, Vec2::new(1.0, 1.0)),
+            ];
+            let stack = depth_stack(&c, SelectFilter::ALL);
+            assert_eq!(stack.len(), 3, "depth chooser must not hide bodies");
+            for w in stack.windows(2) {
+                assert!(w[0].depth <= w[1].depth);
             }
         }
     }

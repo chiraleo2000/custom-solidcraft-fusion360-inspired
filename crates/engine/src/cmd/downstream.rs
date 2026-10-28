@@ -9,10 +9,10 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use solidcraft_doc::motion::ExplodedView;
 use solidcraft_doc::{
-    Board, CamSetup, CamTool, EcadComponent, EcadNet, EcadTrace, GenerativeStudy, RenderScene, Schematic, StoryKey, Storyboard, Study,
-    StudyConstraint, StudyLoad,
+    Board, CamSetup, CamTool, EcadComponent, EcadNet, EcadRegion, EcadTrace, GenerativeCell, GenerativeStudy, RenderScene, Schematic, StoryKey,
+    Storyboard, Study, StudyConstraint, StudyLoad,
 };
-use solidcraft_geom::fea::{self, BeamEnd, BeamLoad, BeamSection, BeamSupport};
+use solidcraft_geom::fea::{self, BeamEnd, BeamLoad, BeamSection, BeamSupport, HexFace, HexLoad, HexSection, HexSupport, StaticField};
 use solidcraft_geom::generative::{self, Objective};
 use solidcraft_geom::{Mesh, Vec3};
 use solidcraft_render::Quat;
@@ -33,7 +33,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.pocket", "2D Pocket", cam_pocket)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
-        .params("sketch; tool_diameter; depth; stepdown?; stepover?. The tool centre stays a radius inside the profile and the cut is stepped"),
+        .params("sketch; tool_diameter; depth; stepdown?; stepover?. The tool centre stays a radius inside the profile, clears around islands, and the cut is stepped"),
     CommandSpec::new("cam.face", "Face", cam_face)
         .at("UTILITIES", "MAKE")
         .icon("extrude")
@@ -75,12 +75,30 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("UTILITIES", "MAKE")
         .icon("extrude")
         .params("body; tool_diameter; stepover? or cusp?. Pass spacing comes from the cusp when stepover is omitted"),
-    CommandSpec::new("cam.pencil", "Pencil", cam_pencil).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
-    CommandSpec::new("cam.contour_3d", "3D Contour", cam_contour3d).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
-    CommandSpec::new("cam.horizontal", "Horizontal", cam_horizontal).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
-    CommandSpec::new("cam.flow", "Flow", cam_flow).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
-    CommandSpec::new("cam.radial", "Radial", cam_radial).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
-    CommandSpec::new("cam.spiral", "Spiral", cam_spiral).at("UTILITIES", "MAKE").icon("extrude").params("not supported yet"),
+    CommandSpec::new("cam.pencil", "Pencil", cam_pencil)
+        .at("UTILITIES", "MAKE")
+        .icon("extrude")
+        .params("not supported yet: pencil needs concave edge detection"),
+    CommandSpec::new("cam.contour_3d", "3D Contour", cam_contour3d)
+        .at("UTILITIES", "MAKE")
+        .icon("extrude")
+        .params("not supported yet: 3D contour needs steep-wall projection"),
+    CommandSpec::new("cam.horizontal", "Horizontal", cam_horizontal)
+        .at("UTILITIES", "MAKE")
+        .icon("extrude")
+        .params("body; tool_diameter; stepover?. Constant-Z bands on upward faces"),
+    CommandSpec::new("cam.flow", "Flow", cam_flow)
+        .at("UTILITIES", "MAKE")
+        .icon("extrude")
+        .params("not supported yet: flow needs UV/isocurve guidance"),
+    CommandSpec::new("cam.radial", "Radial", cam_radial)
+        .at("UTILITIES", "MAKE")
+        .icon("extrude")
+        .params("body; tool_diameter; stepover?. Spokes from the body centre on the upper surface"),
+    CommandSpec::new("cam.spiral", "Spiral", cam_spiral)
+        .at("UTILITIES", "MAKE")
+        .icon("extrude")
+        .params("body; tool_diameter; stepover?. Archimedean spiral on the upper surface"),
     CommandSpec::new("cam.turn.profile", "Turn Profile", cam_turn_profile)
         .at("UTILITIES", "MAKE")
         .icon("revolve")
@@ -94,13 +112,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("extrude")
         .params("sheet: [width, height]; profiles: [[w, h], …]. Overlap is an error"),
     CommandSpec::new("sim.study", "Simulation Study", sim_study).params(
-        "name?; kind?: static; body: name; material?; modulus?: N/mm^2; force?: N; constraints?: [{kind: fixed|pin, target: min_x|max_x}]; loads?: [{kind: force, magnitude, direction?: [x,y,z], target?}]. Changing inputs marks results stale",
+        "name?; kind?: static; body: name; material?; modulus?: N/mm^2; force?: N; constraints?: [{kind: fixed|pin, target: min_x|max_x|min_y|max_y|min_z|max_z}]; loads?: [{kind: force, magnitude, direction?: [x,y,z], target?}]. Changing inputs marks results stale",
     ),
     CommandSpec::new("sim.static", "Static Stress", sim_static).params(
-        "body: an axis-aligned box; force?: N along +Z at max X (default 100); modulus?: N/mm^2 (default 200000, or the material); material?; constraints?: default clamp at min X. Solves with solidcraft-beam-stiffness and reports min/max. The solid is unchanged",
+        "body: name; force?: N (default 100); modulus?: N/mm^2 (default 200000, or the material); material?; constraints?/loads?; elements?: 1..4 for hex. AABB box + Z tip load uses solidcraft-beam-stiffness; other solids/axes use capped solidcraft-hex-grid. Reports min/max. The solid is unchanged",
     ),
     CommandSpec::new("sim.solve", "Solve Study", sim_solve).params(
-        "name?: study; elements?: 1..32. A static axis-aligned box only. Other kinds, a free body, or a study over the size cap are refused. The solid is unchanged",
+        "name?: study; elements?: 1..32 (beam) or 1..4 (hex). Static only. Modal/thermal/… kinds, a free body, or a study over the size cap are refused. The solid is unchanged",
     ),
     CommandSpec::new("sim.modal", "Modal Study", sim_modal).params("body: name. Solving a modal study is not supported yet"),
     CommandSpec::new("sim.thermal", "Thermal Study", sim_thermal).params("body: name. Solving a thermal study is not supported yet"),
@@ -116,7 +134,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("name?|environment?: studio|neutral|white|warm|cool; asset?: name; color?: [r,g,b] 0…1; intensity?: number. An unknown name falls back to white and is reported. No cloud renderer"),
     CommandSpec::new("render.camera", "Render Camera", render_camera).noundo().params("focal?: millimetres, positive"),
     CommandSpec::new("render.image", "Render Image", render_image).noundo().params(
-        "path: png; environment?|asset?: studio name; appearance?: library name. Metalness and roughness shade the pixels. A missing name falls back and is reported. The design is not changed. A cloud renderer is not supported yet",
+        "path: png; environment?|asset?: studio name; appearance?: library name; quality?: draft|standard|high; width?/height?: 16…2048. Local PBR only. A missing name falls back and is reported. The design is not changed. A cloud renderer is not supported yet",
     ),
     CommandSpec::new("anim.storyboard", "Storyboard", anim_storyboard).params(
         "name?; view?: exploded view; study?: motion study; auto?: bool; scale?: number. Copies explode or motion keys when they exist. An empty assembly is an error. Placements stay unchanged",
@@ -127,41 +145,81 @@ pub static COMMANDS: &[CommandSpec] = &[
         .noundo()
         .params("story?: name; time?: seconds. Interpolates preview offsets. Placements stay unchanged"),
     CommandSpec::new("anim.publish", "Publish Storyboard", anim_publish).noundo().params(
-        "path: png; frames?: 1…24; story?: name. One image, or stem_000.png … when there are several frames. Video files are not supported yet. Placements stay unchanged",
+        "path: png; frames?: 1…24; story?: name; quality?: draft|standard|high; width?/height?: 16…2048. One image, or stem_000.png … when there are several frames. Video files are not supported yet. Placements stay unchanged",
     ),
-    CommandSpec::new("ecad.schematic", "Schematic", ecad_schematic).params(
+    CommandSpec::new("ecad.schematic", "Schematic", ecad_schematic)
+        .at("ELECTRONICS", "CREATE")
+        .icon("sketch")
+        .params(
         "parts?: [refdes | {refdes, pins?, x?, y?}]; nets?: [{name, nodes}]. Stores components and nets. Part libraries are not supported yet. PCB autorouting is not supported yet",
     ),
-    CommandSpec::new("ecad.wire", "Wire", ecad_wire).params("a, b: pin or net names. Joins them into a stored net. Does not route copper"),
-    CommandSpec::new("ecad.erc", "Electrical Rules", ecad_erc).noundo().params(
-        "Reports shorts between a power name and a ground name, unconnected parts, and open pins. Does not modify the schematic",
+    CommandSpec::new("ecad.wire", "Wire", ecad_wire)
+        .at("ELECTRONICS", "CREATE")
+        .icon("line")
+        .params("a, b: pin or net names. Joins them into a stored net. Does not route copper"),
+    CommandSpec::new("ecad.erc", "Electrical Rules", ecad_erc)
+        .at("ELECTRONICS", "INSPECT")
+        .icon("measure")
+        .noundo()
+        .params(
+        "Reports shorts between power and ground, unconnected parts, open pins, dangling nets, and undriven power nets. Does not modify the schematic",
     ),
-    CommandSpec::new("ecad.board", "Board", ecad_board).params("width, height: mm. One copper layer. PCB autorouting is not supported yet"),
-    CommandSpec::new("ecad.trace", "Trace", ecad_trace).params("x0, y0, x1, y1, width: mm; net?: name. Places copper; it does not autoroute"),
-    CommandSpec::new("ecad.drc", "Design Rules", ecad_drc).noundo().params(
-        "clearance?: mm (default 0.2, copper edge gap); min_width?: mm (default 0.15). Reports clearance and width violations and does not move copper. Same-net copper may touch",
+    CommandSpec::new("ecad.board", "Board", ecad_board)
+        .at("ELECTRONICS", "CREATE")
+        .icon("box")
+        .params("width, height: mm; layers?: 1…8 (default 1 or the board's current count). Multi-layer copper; PCB autorouting is not supported yet"),
+    CommandSpec::new("ecad.trace", "Trace", ecad_trace)
+        .at("ELECTRONICS", "CREATE")
+        .icon("line")
+        .params(
+        "x0, y0, x1, y1, width: mm; net?: name; layer?: top|bottom|innerN|1…8 (default top); i?/j?: mm arc centre offsets from start, clockwise?: bool — or points: [[x,y]…] (≥3) for a filled region (G36). Places copper on that layer; it does not autoroute",
     ),
-    CommandSpec::new("ecad.push_3d", "Push Board to 3D", ecad_push).params(
-        "thickness?: mm (default 1.6). Creates a PCB component and a board body in the assembly. Component models and PCB autorouting are not supported yet",
+    CommandSpec::new("ecad.drc", "Design Rules", ecad_drc)
+        .at("ELECTRONICS", "INSPECT")
+        .icon("measure")
+        .noundo()
+        .params(
+        "clearance?: mm (default 0.2, same-layer copper edge gap); min_width?: mm (default 0.15); edge?: mm (default 0, copper to board outline). Reports clearance, width and edge violations and does not move copper. Same-net copper on the same layer may touch; different layers are not clearance-checked against each other",
     ),
-    CommandSpec::new("ecad.export", "Export Gerber", ecad_export).noundo().params(
-        "path: Gerber RS-274X subset (public Ucamco Gerber Layer Format), millimetres, outline plus one copper layer. Read back with the same subset. PCB autorouting is not supported yet",
+    CommandSpec::new("ecad.push_3d", "Push Board to 3D", ecad_push)
+        .at("ELECTRONICS", "CREATE")
+        .icon("box")
+        .params(
+        "thickness?: mm (default 1.6). Creates or updates a PCB component and board body in the assembly; returns the board's copper layer count. Component models and PCB autorouting are not supported yet",
     ),
-    CommandSpec::new("drawing.export_dxf", "Export Drawing DXF", drawing_dxf).noundo().params("path: ASCII DXF of the sheet's projected model edges"),
+    CommandSpec::new("ecad.export", "Export Gerber", ecad_export)
+        .at("ELECTRONICS", "CREATE")
+        .icon("export")
+        .noundo()
+        .params(
+        "path: Gerber RS-274X subset (public Ucamco Gerber Layer Format); layer?: top|bottom|innerN|1…8 (default all copper layers as path or path-Ln.gbr). Millimetres, outline, linear/arc draws and regions. PCB autorouting is not supported yet",
+    ),
+    CommandSpec::new("drawing.export_dxf", "Export Drawing DXF", drawing_dxf)
+        .at("DRAWING", "CREATE")
+        .icon("sketch")
+        .noundo()
+        .params("sheet?; path: ASCII DXF of the sheet's projected model edges"),
     CommandSpec::new("generative.study", "Generative Study", gen_study).params(
         "name?; preserve: [body names]; obstacle?: [names]; loads?: [{kind, magnitude, direction, target}]; constraints?: [{kind, target}]; objective?: stiffness|mass. Changing inputs marks the study stale",
     ),
     CommandSpec::new("generative.solve", "Generate", gen_solve).params(
-        "name?: study. Records a candidate box with method solidcraft-section-reduction. Mass keeps 60% of the width. The solid is unchanged",
+        "name?: study. Records a structured-lattice candidate (method solidcraft-structured-lattice). Mass keeps an edge-and-strut. The solid is unchanged",
     ),
     CommandSpec::new("generative.promote", "Promote Candidate", gen_promote)
         .params("name?: study. Inserts the candidate as an editable box body"),
-    CommandSpec::new("drawing.parts_list", "Parts List", parts_list).noundo().params("rows are components, not loose bodies"),
+    CommandSpec::new("drawing.parts_list", "Parts List", parts_list)
+        .at("DRAWING", "MODIFY")
+        .icon("dimension")
+        .noundo()
+        .params("sheet?; rows are components, not loose bodies"),
     CommandSpec::new("drawing.detail", "Detail View", drawing_detail)
         .at("DRAWING", "CREATE")
         .icon("sketch")
-        .params("sheet?; scale: number > 0; origin?: [x,y]"),
-    CommandSpec::new("drawing.title_block", "Title Block", title_block).params("sheet?; title?: text; size?: A4|A3"),
+        .params("sheet?; from?: view index; scale: number > 0; center?: [x,y]; radius?: mm; origin?: [x,y]. Circular detail windows only"),
+    CommandSpec::new("drawing.title_block", "Title Block", title_block)
+        .at("DRAWING", "MODIFY")
+        .icon("sketch")
+        .params("sheet?; title?: text; size?: A4|A3; template?: iso|asme; revision?; drawn?; date?; material?"),
 ];
 
 fn finite(cmd: &str, n: f64, what: &str) -> Result<f64> {
@@ -485,16 +543,16 @@ fn cam_contour3d(s: &mut Session, p: &Value) -> Result<Value> {
     super::cam::not_yet(s, p, "cam.contour_3d")
 }
 fn cam_horizontal(s: &mut Session, p: &Value) -> Result<Value> {
-    super::cam::not_yet(s, p, "cam.horizontal")
+    super::cam::horizontal(s, p)
 }
 fn cam_flow(s: &mut Session, p: &Value) -> Result<Value> {
     super::cam::not_yet(s, p, "cam.flow")
 }
 fn cam_radial(s: &mut Session, p: &Value) -> Result<Value> {
-    super::cam::not_yet(s, p, "cam.radial")
+    super::cam::radial(s, p)
 }
 fn cam_spiral(s: &mut Session, p: &Value) -> Result<Value> {
-    super::cam::not_yet(s, p, "cam.spiral")
+    super::cam::spiral(s, p)
 }
 
 fn cam_turn_profile(s: &mut Session, p: &Value) -> Result<Value> {
@@ -854,7 +912,7 @@ fn constraints_of(cmd: &str, p: &Value) -> Result<Option<Vec<StudyConstraint>>> 
         if !matches!(kind, "fixed" | "pin") {
             return Err(bad(cmd, format!("not supported yet: a {kind} constraint")));
         }
-        if !matches!(target, "min_x" | "max_x") {
+        if !matches!(target, "min_x" | "max_x" | "min_y" | "max_y" | "min_z" | "max_z") {
             return Err(bad(cmd, format!("not supported yet: a constraint on `{target}`")));
         }
         out.push(StudyConstraint { kind: kind.to_string(), target: target.to_string() });
@@ -891,7 +949,7 @@ fn loads_of_params(cmd: &str, p: &Value) -> Result<Option<Vec<StudyLoad>>> {
             return Err(bad(cmd, "the load direction is not usable"));
         }
         let target = item.get("target").and_then(Value::as_str).unwrap_or("max_x");
-        if !matches!(target, "min_x" | "max_x") {
+        if !matches!(target, "min_x" | "max_x" | "min_y" | "max_y" | "min_z" | "max_z") {
             return Err(bad(cmd, format!("not supported yet: a load on `{target}`")));
         }
         out.push(StudyLoad { kind: kind.to_string(), magnitude, direction, target: target.to_string() });
@@ -959,12 +1017,24 @@ fn feature_ids(s: &Session) -> Vec<u64> {
     s.doc.features.iter().map(|feature| feature.id).collect()
 }
 
-fn box_section(s: &Session, cmd: &str, body: &str) -> Result<(f64, f64, f64)> {
+fn face_target(cmd: &str, target: &str) -> Result<HexFace> {
+    match target {
+        "min_x" => Ok(HexFace::MinX),
+        "max_x" => Ok(HexFace::MaxX),
+        "min_y" => Ok(HexFace::MinY),
+        "max_y" => Ok(HexFace::MaxY),
+        "min_z" => Ok(HexFace::MinZ),
+        "max_z" => Ok(HexFace::MaxZ),
+        other => Err(bad(cmd, format!("not supported yet: a constraint on `{other}`"))),
+    }
+}
+
+fn box_section(s: &Session, cmd: &str, body: &str) -> Result<Option<(f64, f64, f64)>> {
     let state = s.model.state();
     let solid = state.body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
     let measured = solidcraft_kernel::measure(&solid.body).map_err(|e| bad(cmd, e.to_string()))?;
     if measured.merged.face_types.get("plane").copied() != Some(6) {
-        return Err(bad(cmd, "not supported yet: static stress of a body that is not a box"));
+        return Ok(None);
     }
     let length = measured.bbox.max.x - measured.bbox.min.x;
     let width = measured.bbox.max.y - measured.bbox.min.y;
@@ -978,9 +1048,29 @@ fn box_section(s: &Session, cmd: &str, body: &str) -> Result<(f64, f64, f64)> {
     let box_volume = length * width * height;
     let gap = (measured.volume - box_volume).abs();
     if !(measured.volume.is_finite() && gap <= (1e-4 * box_volume).max(1e-3)) {
-        return Err(bad(cmd, "not supported yet: static stress of a body that is not an axis-aligned box"));
+        return Ok(None);
     }
-    Ok((length, width, height))
+    Ok(Some((length, width, height)))
+}
+
+fn beam_compatible(constraints: &[StudyConstraint], loads: &[StudyLoad], legacy_force: f64) -> bool {
+    if constraints.is_empty() {
+        return false;
+    }
+    if !constraints.iter().all(|c| matches!(c.target.as_str(), "min_x" | "max_x") && matches!(c.kind.as_str(), "fixed" | "pin")) {
+        return false;
+    }
+    let source = if loads.is_empty() && legacy_force != 0.0 { vec![default_load(legacy_force)] } else { loads.to_vec() };
+    if source.is_empty() {
+        return false;
+    }
+    source.iter().all(|load| {
+        if load.kind != "force" || !matches!(load.target.as_str(), "min_x" | "max_x") {
+            return false;
+        }
+        let len = direction_len(load.direction);
+        len.is_finite() && len > 1e-9 && load.direction[0].abs() <= 1e-3 * len && load.direction[1].abs() <= 1e-3 * len
+    })
 }
 
 fn beam_supports(cmd: &str, constraints: &[StudyConstraint]) -> Result<Vec<BeamSupport>> {
@@ -1029,22 +1119,110 @@ fn beam_loads(cmd: &str, loads: &[StudyLoad], legacy_force: f64) -> Result<Vec<B
     Ok(out)
 }
 
-fn run_beam(
+fn hex_supports(cmd: &str, constraints: &[StudyConstraint]) -> Result<Vec<HexSupport>> {
+    if constraints.is_empty() {
+        return Err(bad(cmd, "under-constrained: the beam can move as a rigid body"));
+    }
+    let mut supports = Vec::with_capacity(constraints.len());
+    for constraint in constraints {
+        let face = face_target(cmd, &constraint.target)?;
+        let clamp = match constraint.kind.as_str() {
+            "fixed" => true,
+            "pin" => false,
+            other => return Err(bad(cmd, format!("not supported yet: a {other} constraint"))),
+        };
+        supports.push(HexSupport { face, clamp });
+    }
+    Ok(supports)
+}
+
+fn hex_loads(cmd: &str, loads: &[StudyLoad], legacy_force: f64) -> Result<Vec<HexLoad>> {
+    let source = if loads.is_empty() && legacy_force != 0.0 { vec![default_load(legacy_force)] } else { loads.to_vec() };
+    if source.is_empty() {
+        return Err(bad(cmd, "under-constrained: the beam can move as a rigid body"));
+    }
+    let mut out = Vec::with_capacity(source.len());
+    for load in &source {
+        if load.kind != "force" {
+            return Err(bad(cmd, format!("not supported yet: a {} load", load.kind)));
+        }
+        let face = match load.target.as_str() {
+            "min_x" => HexFace::MinX,
+            "max_x" => HexFace::MaxX,
+            "min_y" => HexFace::MinY,
+            "max_y" => HexFace::MaxY,
+            "min_z" => HexFace::MinZ,
+            "max_z" => HexFace::MaxZ,
+            other => return Err(bad(cmd, format!("not supported yet: a load on `{other}`"))),
+        };
+        let len = direction_len(load.direction);
+        if !(len.is_finite() && len > 1e-9) {
+            return Err(bad(cmd, "the load direction is not usable"));
+        }
+        let unit = [load.direction[0] / len, load.direction[1] / len, load.direction[2] / len];
+        out.push(HexLoad { face, force: [load.magnitude * unit[0], load.magnitude * unit[1], load.magnitude * unit[2]] });
+    }
+    Ok(out)
+}
+
+fn run_hex(
+    s: &Session,
     cmd: &str,
-    size: (f64, f64, f64),
+    body: &str,
     modulus: f64,
     elements: usize,
     constraints: &[StudyConstraint],
     loads: &[StudyLoad],
     legacy_force: f64,
-) -> Result<fea::BeamField> {
-    let supports = beam_supports(cmd, constraints)?;
-    let applied = beam_loads(cmd, loads, legacy_force)?;
-    let section = BeamSection { length: size.0, width: size.1, height: size.2, modulus, elements };
-    fea::solve_beam(section, &supports, &applied).map_err(|err| bad(cmd, err))
+) -> Result<StaticField> {
+    let solid = s.model.state().body(body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?.body.clone();
+    let measured = solidcraft_kernel::measure(&solid).map_err(|e| bad(cmd, e.to_string()))?;
+    if !(measured.volume.is_finite() && measured.volume > 1e-9) {
+        return Err(bad(cmd, "not supported yet: static stress of a body with no usable volume"));
+    }
+    let size = measured.bbox.size();
+    if !(size.x.is_finite() && size.y.is_finite() && size.z.is_finite() && size.x > 1e-6 && size.y > 1e-6 && size.z > 1e-6) {
+        return Err(bad(cmd, "the beam and the load must be finite"));
+    }
+    if size.x > fea::MAX_DIMENSION || size.y > fea::MAX_DIMENSION || size.z > fea::MAX_DIMENSION {
+        return Err(bad(cmd, "the study exceeds the size cap"));
+    }
+    let n = fea::hex_divisions(elements);
+    let pitch = [size.x / n as f64, size.y / n as f64, size.z / n as f64];
+    let origin = [measured.bbox.min.x, measured.bbox.min.y, measured.bbox.min.z];
+    let tol = (solid.size() * 2e-3).max(1e-3);
+    let mesh = solid.tessellate(tol).map_err(|e| bad(cmd, e.to_string()))?;
+    let index = mesh.inside_index();
+    let occupied = fea::fill_occupancy(origin, pitch, n, n, n, &|center| index.contains(Vec3::new(center[0], center[1], center[2])))
+        .map_err(|err| bad(cmd, err))?;
+    let section = HexSection { origin, pitch, nx: n, ny: n, nz: n, occupied, modulus };
+    let supports = hex_supports(cmd, constraints)?;
+    let applied = hex_loads(cmd, loads, legacy_force)?;
+    fea::solve_hex_grid(&section, &supports, &applied).map_err(|err| bad(cmd, err))
 }
 
-fn apply_field(study: &mut Study, field: &fea::BeamField) {
+fn run_static(
+    s: &Session,
+    cmd: &str,
+    body: &str,
+    modulus: f64,
+    elements: usize,
+    constraints: &[StudyConstraint],
+    loads: &[StudyLoad],
+    legacy_force: f64,
+) -> Result<StaticField> {
+    if let Some(size) = box_section(s, cmd, body)?
+        && beam_compatible(constraints, loads, legacy_force)
+    {
+        let supports = beam_supports(cmd, constraints)?;
+        let applied = beam_loads(cmd, loads, legacy_force)?;
+        let section = BeamSection { length: size.0, width: size.1, height: size.2, modulus, elements };
+        return fea::solve_beam(section, &supports, &applied).map_err(|err| bad(cmd, err));
+    }
+    run_hex(s, cmd, body, modulus, elements, constraints, loads, legacy_force)
+}
+
+fn apply_field(study: &mut Study, field: &StaticField) {
     study.tip = Some(field.tip);
     study.method = field.method.to_string();
     study.stale = false;
@@ -1054,7 +1232,7 @@ fn apply_field(study: &mut Study, field: &fea::BeamField) {
     study.stress_max = Some(field.stress_max);
 }
 
-fn static_json(name: &str, field: &fea::BeamField) -> Value {
+fn static_json(name: &str, field: &StaticField) -> Value {
     let peak = field.stress_max.abs().max(field.stress_min.abs());
     let colours: Vec<[u8; 3]> = field
         .stress
@@ -1201,7 +1379,7 @@ fn put_static(
     force: f64,
     constraints: Vec<StudyConstraint>,
     loads: Vec<StudyLoad>,
-    field: &fea::BeamField,
+    field: &StaticField,
 ) -> Result<()> {
     let cmd = "sim.static";
     let stored_force = signed_force(&loads, force);
@@ -1240,8 +1418,7 @@ fn sim_static(s: &mut Session, p: &Value) -> Result<Value> {
     let loads = loads_of_params(cmd, p)?.unwrap_or_else(|| vec![default_load(force)]);
     let elements = element_count(cmd, p)?;
     let features = feature_ids(s);
-    let size = box_section(s, cmd, &body)?;
-    let field = run_beam(cmd, size, modulus, elements, &constraints, &loads, force)?;
+    let field = run_static(s, cmd, &body, modulus, elements, &constraints, &loads, force)?;
     if feature_ids(s) != features {
         return Err(bad(cmd, "the study changed the solid"));
     }
@@ -1267,8 +1444,7 @@ fn sim_solve(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let elements = element_count(cmd, p)?;
     let features = feature_ids(s);
-    let size = box_section(s, cmd, &body)?;
-    let field = run_beam(cmd, size, modulus, elements, &constraints, &loads, force)?;
+    let field = run_static(s, cmd, &body, modulus, elements, &constraints, &loads, force)?;
     if feature_ids(s) != features {
         return Err(bad(cmd, "the study changed the solid"));
     }
@@ -1310,11 +1486,48 @@ fn sim_cooling(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 const IDENTITY_ROTATE: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
-const RENDER_W: usize = 160;
-const RENDER_H: usize = 120;
+const RENDER_W_DRAFT: usize = 160;
+const RENDER_H_DRAFT: usize = 120;
+const RENDER_W_STANDARD: usize = 320;
+const RENDER_H_STANDARD: usize = 240;
+const RENDER_W_HIGH: usize = 640;
+const RENDER_H_HIGH: usize = 480;
+const RENDER_DIM_MIN: u64 = 16;
+const RENDER_DIM_MAX: u64 = 2048;
 
 fn scene(s: &mut Session) -> &mut RenderScene {
     s.doc_mut().render_scene.get_or_insert(RenderScene { color: [1.0, 1.0, 1.0], intensity: 1.0, focal: 50.0 })
+}
+
+/// Local PBR output size. `quality` picks a preset; `width` / `height` override (capped).
+fn render_size(p: &Value, cmd: &str) -> Result<(usize, usize)> {
+    let quality = str_(p, "quality").unwrap_or("draft");
+    let (qw, qh) = match quality.trim().to_ascii_lowercase().as_str() {
+        "draft" | "low" => (RENDER_W_DRAFT, RENDER_H_DRAFT),
+        "standard" | "preview" | "medium" => (RENDER_W_STANDARD, RENDER_H_STANDARD),
+        "high" | "final" => (RENDER_W_HIGH, RENDER_H_HIGH),
+        _ => return Err(bad(cmd, "`quality` must be draft, standard, or high")),
+    };
+    let dim = |key: &str| -> Result<Option<usize>> {
+        match p.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => {
+                let n = v.as_u64().ok_or_else(|| bad(cmd, format!("`{key}` must be a whole number")))?;
+                if !(RENDER_DIM_MIN..=RENDER_DIM_MAX).contains(&n) {
+                    return Err(bad(cmd, format!("`{key}` must be {RENDER_DIM_MIN}…{RENDER_DIM_MAX}")));
+                }
+                Ok(Some(n as usize))
+            }
+        }
+    };
+    let width = dim("width")?;
+    let height = dim("height")?;
+    Ok(match (width, height) {
+        (None, None) => (qw, qh),
+        (Some(w), None) => (w, ((w as f64) * (qh as f64) / (qw as f64)).round().clamp(RENDER_DIM_MIN as f64, RENDER_DIM_MAX as f64) as usize),
+        (None, Some(h)) => (((h as f64) * (qw as f64) / (qh as f64)).round().clamp(RENDER_DIM_MIN as f64, RENDER_DIM_MAX as f64) as usize, h),
+        (Some(w), Some(h)) => (w, h),
+    })
 }
 
 fn rotate_is_identity(q: &[f64; 4]) -> bool {
@@ -1782,6 +1995,7 @@ fn render_paints(
     origins: &BTreeMap<u64, Vec3>,
     light: ([f64; 3], f64),
     focal: f64,
+    size: (usize, usize),
     cmd: &str,
 ) -> Result<solidcraft_render::Canvas> {
     let mut scene = solidcraft_render::Scene { light: Some(light), ..solidcraft_render::Scene::default() };
@@ -1815,7 +2029,8 @@ fn render_paints(
     let distance = (radius * 3.2).max(20.0) * (50.0 / focal);
     let cam = solidcraft_render::Camera { target: center, distance, ..Default::default() };
     scene.radius = radius;
-    Ok(solidcraft_render::render(&scene, &cam, RENDER_W, RENDER_H))
+    let (w, h) = (size.0.clamp(1, 8192), size.1.clamp(1, 8192));
+    Ok(solidcraft_render::render(&scene, &cam, w, h))
 }
 
 fn image_varied(rgba: &[u8]) -> bool {
@@ -1967,6 +2182,7 @@ fn render_image(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "not supported yet: a cloud renderer"));
     }
     let path = usable_path(p, cmd)?;
+    let size = render_size(p, cmd)?;
     let doc = Arc::as_ptr(&s.doc);
     let pending = s.pending_moves.clone();
     let (named, mut missing, _) = named_light(p, cmd)?;
@@ -1986,7 +2202,8 @@ fn render_image(s: &mut Session, p: &Value) -> Result<Value> {
         None => (stored.color, stored.intensity),
     };
     let paints = body_paints(s, cmd)?;
-    let canvas = render_paints(&paints, &BTreeMap::new(), &origins_of(s), (color, intensity), stored.focal, cmd)?;
+    let decals = s.doc.canvases.iter().filter(|c| c.visible).count().min(10_000);
+    let canvas = render_paints(&paints, &BTreeMap::new(), &origins_of(s), (color, intensity), stored.focal, size, cmd)?;
     if !image_varied(&canvas.rgba) {
         return Err(bad(cmd, "the render has no shaded solid"));
     }
@@ -2000,7 +2217,17 @@ fn render_image(s: &mut Session, p: &Value) -> Result<Value> {
     }
     missing.sort();
     missing.dedup();
-    Ok(json!({"path": path, "width": w, "height": h, "varied": true, "fallback": !missing.is_empty(), "missing": missing}))
+    Ok(json!({
+        "path": path,
+        "width": w,
+        "height": h,
+        "quality": str_(p, "quality").unwrap_or("draft"),
+        "varied": true,
+        "fallback": !missing.is_empty(),
+        "missing": missing,
+        "decals": decals,
+        "light": {"color": color, "intensity": intensity},
+    }))
 }
 
 fn anim_storyboard(s: &mut Session, p: &Value) -> Result<Value> {
@@ -2140,6 +2367,7 @@ fn anim_publish(s: &mut Session, p: &Value) -> Result<Value> {
     if is_video(path) {
         return Err(bad(cmd, "not supported yet: video. Publish a png image or an image sequence"));
     }
+    let size = render_size(p, cmd)?;
     let frames = match p.get("frames") {
         None => {
             let (start, end) = key_span(&keys);
@@ -2160,7 +2388,7 @@ fn anim_publish(s: &mut Session, p: &Value) -> Result<Value> {
     for index in 0..frames {
         let t = if frames <= 1 { start } else { start + (end - start) * index as f64 / (frames - 1) as f64 };
         let poses = pose_map(&keys, t, cmd)?;
-        let canvas = render_paints(&paints, &poses, &origins, (stored.color, stored.intensity), stored.focal, cmd)?;
+        let canvas = render_paints(&paints, &poses, &origins, (stored.color, stored.intensity), stored.focal, size, cmd)?;
         let file = sequence_path(path, index, frames);
         write_png(cmd, &file, canvas)?;
         paths.push(file);
@@ -2168,7 +2396,14 @@ fn anim_publish(s: &mut Session, p: &Value) -> Result<Value> {
     if !doc_unchanged(s, doc, &pending) {
         return Err(bad(cmd, "publishing moved the assembly"));
     }
-    Ok(json!({"path": path, "frames": frames, "paths": paths}))
+    Ok(json!({
+        "path": path,
+        "frames": frames,
+        "paths": paths,
+        "width": size.0,
+        "height": size.1,
+        "quality": str_(p, "quality").unwrap_or("draft"),
+    }))
 }
 
 // Electronics. Part names are the caller's; there is no vendor library.
@@ -2183,6 +2418,9 @@ const MAX_ECAD_NAME: usize = 64;
 const DEFAULT_CLEARANCE: f64 = 0.2;
 const DEFAULT_MIN_WIDTH: f64 = 0.15;
 const DEFAULT_THICKNESS: f64 = 1.6;
+const MAX_ECAD_LAYERS: u32 = 8;
+const MAX_ECAD_REGIONS: usize = 256;
+const MAX_ECAD_REGION_POINTS: usize = 256;
 
 fn ecad_schematic(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ecad.schematic";
@@ -2224,7 +2462,7 @@ fn ecad_erc(s: &mut Session, p: &Value) -> Result<Value> {
     ecad_deferred(p, cmd)?;
     let before = s.doc.to_json();
     let report = match s.doc.schematic.clone() {
-        None => json!({"shorts": 0, "unconnected": 0, "open_pins": 0, "nets": 0}),
+        None => json!({"shorts": 0, "unconnected": 0, "open_pins": 0, "dangling": 0, "undriven": 0, "nets": 0}),
         Some(schematic) => erc_report(cmd, &schematic)?,
     };
     if s.doc.to_json() != before {
@@ -2236,20 +2474,59 @@ fn ecad_erc(s: &mut Session, p: &Value) -> Result<Value> {
 fn ecad_board(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ecad.board";
     ecad_deferred(p, cmd)?;
+    let _ = parse_copper_layer(cmd, p)?; // refuse bare/unknown `layer` names; board uses `layers`
     let width = positive_mm(cmd, p, "width")?;
     let height = positive_mm(cmd, p, "height")?;
     let traces = copper(s);
     if traces.iter().any(|trace| !trace_ok(trace)) {
         return Err(bad(cmd, "a trace is not usable"));
     }
-    set_layout(s, width, height, traces);
+    let current = board_layers(s).max(1);
+    let layers = read_layer_count(cmd, p, current)?;
+    if traces.iter().any(|trace| copper_layer(trace) > layers) {
+        return Err(bad(cmd, "a trace is on a layer above the board layer count"));
+    }
+    set_layout(s, width, height, layers, traces, copper_regions(s));
     let count = s.doc.board.as_ref().map(|board| board.traces.len()).unwrap_or(0);
-    Ok(json!({"width": width, "height": height, "traces": count}))
+    Ok(json!({"width": width, "height": height, "traces": count, "layers": layers}))
 }
 
 fn ecad_trace(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ecad.trace";
     ecad_deferred(p, cmd)?;
+    let net = match str_(p, "net") {
+        None => String::new(),
+        Some(net) => ecad_name(cmd, net, "net", true)?,
+    };
+    let layer = parse_copper_layer(cmd, p)?.unwrap_or(1);
+    let (board_width, board_height) = s
+        .doc
+        .board
+        .as_ref()
+        .map(|board| (board.width, board.height))
+        .unwrap_or_else(|| s.doc.schematic.as_ref().map(|schematic| (schematic.board_width, schematic.board_height)).unwrap_or((0.0, 0.0)));
+    let mut layers = board_layers(s).max(1);
+    if layer > layers {
+        if s.doc.board.is_some() || board_width > 0.0 {
+            return Err(bad(cmd, format!("layer {layer} is above the board's {layers} copper layers")));
+        }
+        layers = layer;
+    }
+    if p.get("points").is_some() {
+        let region = read_region(cmd, p, layer, net)?;
+        let mut regions = copper_regions(s);
+        if regions.len() >= MAX_ECAD_REGIONS {
+            return Err(bad(cmd, "too many Gerber regions"));
+        }
+        if regions.iter().any(|region| !region_ok(region)) {
+            return Err(bad(cmd, "a Gerber region is not usable"));
+        }
+        regions.push(region);
+        let traces = copper(s);
+        set_layout(s, board_width, board_height, layers, traces, regions);
+        let count = s.doc.board.as_ref().map(|board| board.regions.len()).unwrap_or(0);
+        return Ok(json!({"regions": count, "layer": layer, "layers": layers}));
+    }
     let mut coords = [0.0; 4];
     for (index, key) in ["x0", "y0", "x1", "y1"].into_iter().enumerate() {
         let value = p.get(key).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("`{key}` is required")))?;
@@ -2261,10 +2538,7 @@ fn ecad_trace(s: &mut Session, p: &Value) -> Result<Value> {
     if width >= 100.0 {
         return Err(bad(cmd, "trace width must be under 100 mm"));
     }
-    let net = match str_(p, "net") {
-        None => String::new(),
-        Some(net) => ecad_name(cmd, net, "net", true)?,
-    };
+    let (i, j, clockwise) = read_arc_offsets(cmd, p)?;
     let mut traces = copper(s);
     if traces.len() >= MAX_ECAD_TRACES {
         return Err(bad(cmd, "too many traces"));
@@ -2272,49 +2546,55 @@ fn ecad_trace(s: &mut Session, p: &Value) -> Result<Value> {
     if traces.iter().any(|trace| !trace_ok(trace)) {
         return Err(bad(cmd, "a trace is not usable"));
     }
-    let (board_width, board_height) = s
-        .doc
-        .board
-        .as_ref()
-        .map(|board| (board.width, board.height))
-        .unwrap_or_else(|| s.doc.schematic.as_ref().map(|schematic| (schematic.board_width, schematic.board_height)).unwrap_or((0.0, 0.0)));
-    traces.push(EcadTrace { x0: coords[0], y0: coords[1], x1: coords[2], y1: coords[3], width, net });
-    set_layout(s, board_width, board_height, traces);
+    traces.push(EcadTrace { x0: coords[0], y0: coords[1], x1: coords[2], y1: coords[3], width, net, layer, i, j, clockwise });
+    set_layout(s, board_width, board_height, layers, traces, copper_regions(s));
     let count = s.doc.board.as_ref().map(|board| board.traces.len()).unwrap_or(0);
-    Ok(json!({"traces": count}))
+    Ok(json!({"traces": count, "layer": layer, "layers": layers, "arc": i.is_some() || j.is_some()}))
 }
 
 fn ecad_drc(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ecad.drc";
     ecad_deferred(p, cmd)?;
+    let _ = parse_copper_layer(cmd, p)?;
     let clearance = optional_mm(cmd, p, "clearance", DEFAULT_CLEARANCE)?;
     let min_width = optional_mm(cmd, p, "min_width", DEFAULT_MIN_WIDTH)?;
+    let edge = optional_mm(cmd, p, "edge", 0.0)?;
     let before = s.doc.to_json();
     let traces = copper(s);
-    let (clearance_hits, width_hits) = count_drc(&traces, clearance, min_width)?;
+    let regions = copper_regions(s);
+    let (bw, bh) = board_size(s).unwrap_or((0.0, 0.0));
+    let (clearance_hits, width_hits, edge_hits) = count_drc(&traces, &regions, clearance, min_width, edge, bw, bh)?;
     if s.doc.to_json() != before {
         return Err(bad(cmd, "the check moved the copper"));
     }
-    Ok(json!({"violations": clearance_hits + width_hits, "clearance": clearance_hits, "width": width_hits}))
+    Ok(json!({
+        "violations": clearance_hits + width_hits + edge_hits,
+        "clearance": clearance_hits,
+        "width": width_hits,
+        "edge": edge_hits,
+        "layers": board_layers(s).max(1),
+    }))
 }
 
 fn ecad_push(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ecad.push_3d";
     ecad_deferred(p, cmd)?;
+    let _ = parse_copper_layer(cmd, p)?;
     if p.get("models").and_then(Value::as_bool) == Some(true) {
         return Err(bad(cmd, "not supported yet: component models on the board"));
     }
     let thickness = thickness_of(p, cmd)?;
     let (width, height) = board_size(s).ok_or_else(|| bad(cmd, "create a board first"))?;
-    if pcb_exists(s) {
-        return existing_board(width, height, thickness, pcb_volume(s));
-    }
+    let layers = board_layers(s).max(1);
     let active = s.active_component;
     let active_path = s.active_occurrence_path.clone();
-    let placed = place_board(s, width, height, thickness);
+    let mut placed = if pcb_exists(s) { existing_board(s, width, height, thickness) } else { place_board(s, width, height, thickness) }?;
     s.active_component = active;
     s.active_occurrence_path = active_path;
-    placed
+    if let Some(obj) = placed.as_object_mut() {
+        obj.insert("layers".into(), json!(layers));
+    }
+    Ok(placed)
 }
 
 fn ecad_export(s: &mut Session, p: &Value) -> Result<Value> {
@@ -2324,41 +2604,144 @@ fn ecad_export(s: &mut Session, p: &Value) -> Result<Value> {
     let path = usable_path(p, cmd)?;
     let (width, height) = board_size(s).ok_or_else(|| bad(cmd, "create a board first"))?;
     let traces = copper(s);
+    let regions = copper_regions(s);
     if traces.iter().any(|trace| !trace_ok(trace)) {
         return Err(bad(cmd, "a trace is not usable"));
     }
-    let layer = solidcraft_io::GerberLayer {
-        width,
-        height,
-        traces: traces
-            .iter()
-            .map(|trace| solidcraft_io::GerberTrace { x0: trace.x0, y0: trace.y0, x1: trace.x1, y1: trace.y1, width: trace.width })
-            .collect(),
-    };
-    let text = solidcraft_io::write_gerber(&layer).map_err(|err| bad(cmd, err.to_string()))?;
-    let back = solidcraft_io::read_gerber(&text).map_err(|err| bad(cmd, format!("export was not readable: {err}")))?;
-    if (back.width - width).abs() > 1e-4 || (back.height - height).abs() > 1e-4 || back.traces.len() != layer.traces.len() {
-        return Err(bad(cmd, "export did not round-trip"));
+    if regions.iter().any(|region| !region_ok(region)) {
+        return Err(bad(cmd, "a Gerber region is not usable"));
     }
+    let layers = board_layers(s).max(1);
+    let selected = parse_copper_layer(cmd, p)?;
     let before = s.doc.to_json();
-    solidcraft_io::write_atomic(Path::new(path), text.as_bytes(), false).map_err(|err| bad(cmd, format!("{path}: {err}")))?;
+    let written = write_gerber_layers(cmd, path, width, height, layers, selected, &traces, &regions)?;
     if s.doc.to_json() != before {
         return Err(bad(cmd, "export changed the design"));
     }
-    Ok(json!({"path": path, "format": "gerber-rs274x", "traces": layer.traces.len()}))
+    Ok(json!({
+        "path": path,
+        "format": "gerber-rs274x",
+        "traces": written.iter().map(|file| file.1).sum::<usize>(),
+        "regions": written.iter().map(|file| file.3).sum::<usize>(),
+        "layers": written.iter().map(|file| file.2).collect::<Vec<_>>(),
+        "files": written.iter().map(|file| file.0.clone()).collect::<Vec<_>>(),
+    }))
+}
+
+fn parse_copper_layer(cmd: &str, p: &Value) -> Result<Option<u32>> {
+    let Some(value) = p.get("layer") else { return Ok(None) };
+    let layer = match value {
+        Value::Number(n) => n.as_u64().ok_or_else(|| bad(cmd, "`layer` must be 1…8"))? as u32,
+        Value::String(name) => {
+            let lower = name.trim().to_ascii_lowercase();
+            match lower.as_str() {
+                "top" | "f.cu" | "1" => 1,
+                "bottom" | "bot" | "b.cu" | "2" => 2,
+                other if other.starts_with("inner") => {
+                    let digits: String = other.chars().skip(5).filter(|c| c.is_ascii_digit()).collect();
+                    let n: u32 = digits.parse().map_err(|_| bad(cmd, "`layer` must be top, bottom, innerN, or 1…8"))?;
+                    n.checked_add(2).ok_or_else(|| bad(cmd, "`layer` is out of range"))?
+                }
+                other => {
+                    let n: u32 = other.parse().map_err(|_| bad(cmd, "`layer` must be top, bottom, innerN, or 1…8"))?;
+                    n
+                }
+            }
+        }
+        _ => return Err(bad(cmd, "`layer` must be top, bottom, innerN, or 1…8")),
+    };
+    if !(1..=MAX_ECAD_LAYERS).contains(&layer) {
+        return Err(bad(cmd, format!("`layer` must be 1…{MAX_ECAD_LAYERS}")));
+    }
+    Ok(Some(layer))
+}
+
+fn read_layer_count(cmd: &str, p: &Value, default: u32) -> Result<u32> {
+    let Some(value) = p.get("layers") else { return Ok(default.max(1)) };
+    let n = value.as_u64().ok_or_else(|| bad(cmd, "`layers` must be 1…8"))?;
+    if !(1..=MAX_ECAD_LAYERS as u64).contains(&n) {
+        return Err(bad(cmd, format!("`layers` must be 1…{MAX_ECAD_LAYERS}")));
+    }
+    Ok(n as u32)
+}
+
+fn write_gerber_layers(
+    cmd: &str,
+    path: &str,
+    width: f64,
+    height: f64,
+    layers: u32,
+    selected: Option<u32>,
+    traces: &[EcadTrace],
+    regions: &[EcadRegion],
+) -> Result<Vec<(String, usize, u32, usize)>> {
+    let targets: Vec<u32> = match selected {
+        Some(layer) => {
+            if layer > layers {
+                return Err(bad(cmd, format!("layer {layer} is above the board's {layers} copper layers")));
+            }
+            vec![layer]
+        }
+        None if layers <= 1 => vec![1],
+        None => (1..=layers).collect(),
+    };
+    let mut written = Vec::new();
+    for &layer in &targets {
+        let layer_traces: Vec<_> = traces.iter().filter(|trace| copper_layer(trace) == layer).map(gerber_trace_from_ecad).collect();
+        let layer_regions: Vec<_> = regions
+            .iter()
+            .filter(|region| region_layer(region) == layer)
+            .map(|region| solidcraft_io::GerberRegion { points: region.points.clone() })
+            .collect();
+        let gerber = solidcraft_io::GerberLayer { width, height, traces: layer_traces, regions: layer_regions, layer_index: layer };
+        let text = solidcraft_io::write_gerber(&gerber).map_err(|err| bad(cmd, err.to_string()))?;
+        let back = solidcraft_io::read_gerber(&text).map_err(|err| bad(cmd, format!("export was not readable: {err}")))?;
+        if (back.width - width).abs() > 1e-4
+            || (back.height - height).abs() > 1e-4
+            || back.traces.len() != gerber.traces.len()
+            || back.regions.len() != gerber.regions.len()
+        {
+            return Err(bad(cmd, "export did not round-trip"));
+        }
+        let out_path = if targets.len() == 1 { path.to_string() } else { layer_export_path(path, layer) };
+        solidcraft_io::write_atomic(Path::new(&out_path), text.as_bytes(), false).map_err(|err| bad(cmd, format!("{out_path}: {err}")))?;
+        written.push((out_path, gerber.traces.len(), layer, gerber.regions.len()));
+    }
+    Ok(written)
+}
+
+fn gerber_trace_from_ecad(trace: &EcadTrace) -> solidcraft_io::GerberTrace {
+    if trace.is_arc() {
+        solidcraft_io::GerberTrace {
+            x0: trace.x0,
+            y0: trace.y0,
+            x1: trace.x1,
+            y1: trace.y1,
+            width: trace.width,
+            i: Some(trace.i.unwrap_or(0.0)),
+            j: Some(trace.j.unwrap_or(0.0)),
+            clockwise: trace.clockwise,
+        }
+    } else {
+        solidcraft_io::GerberTrace::linear(trace.x0, trace.y0, trace.x1, trace.y1, trace.width)
+    }
+}
+
+fn layer_export_path(path: &str, layer: u32) -> String {
+    let p = Path::new(path);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("gbr");
+    match p.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(format!("{stem}-L{layer}.{ext}")).to_string_lossy().into_owned(),
+        _ => format!("{stem}-L{layer}.{ext}"),
+    }
 }
 
 fn ecad_deferred(p: &Value, cmd: &str) -> Result<()> {
     if matches!(p.get("autoroute"), Some(Value::Bool(true))) || matches!(p.get("route"), Some(Value::Bool(true))) {
         return Err(bad(cmd, "not supported yet: PCB autorouting"));
     }
-    let Some(layer) = p.get("layer") else { return Ok(()) };
-    let top = match layer {
-        Value::String(name) => name.eq_ignore_ascii_case("top") || name == "1",
-        Value::Number(number) => number.as_u64() == Some(1),
-        _ => false,
-    };
-    if top { Ok(()) } else { Err(bad(cmd, "not supported yet: only one copper layer")) }
+    Ok(())
 }
 
 fn ecad_name(cmd: &str, raw: &str, what: &str, dotted: bool) -> Result<String> {
@@ -2627,7 +3010,16 @@ fn erc_report(cmd: &str, schematic: &Schematic) -> Result<Value> {
     let parts = erc_parts(schematic);
     let unconnected = parts.iter().filter(|part| part_unconnected(part, &names)).count();
     let open_pins = open_pin_count(&parts, &names);
-    Ok(json!({"shorts": shorts, "unconnected": unconnected, "open_pins": open_pins, "nets": schematic.nets.len()}))
+    let dangling = schematic.nets.iter().filter(|net| net.nodes.len() < 2).count();
+    let undriven = schematic.nets.iter().filter(|net| net_class(&net.name) == 1 && !net.nodes.iter().any(|node| node.contains('.'))).count();
+    Ok(json!({
+        "shorts": shorts,
+        "unconnected": unconnected,
+        "open_pins": open_pins,
+        "dangling": dangling,
+        "undriven": undriven,
+        "nets": schematic.nets.len(),
+    }))
 }
 
 fn erc_parts(schematic: &Schematic) -> Vec<EcadComponent> {
@@ -2759,23 +3151,117 @@ fn copper(s: &Session) -> Vec<EcadTrace> {
     schematic.traces.iter().copied().map(trace_from_array).collect()
 }
 
+fn copper_regions(s: &Session) -> Vec<EcadRegion> {
+    s.doc.board.as_ref().map(|board| board.regions.clone()).unwrap_or_default()
+}
+
 fn trace_from_array(trace: [f64; 5]) -> EcadTrace {
-    EcadTrace { x0: trace[0], y0: trace[1], x1: trace[2], y1: trace[3], width: trace[4], net: String::new() }
+    EcadTrace {
+        x0: trace[0],
+        y0: trace[1],
+        x1: trace[2],
+        y1: trace[3],
+        width: trace[4],
+        net: String::new(),
+        layer: 1,
+        i: None,
+        j: None,
+        clockwise: false,
+    }
 }
 
 fn trace_array(trace: &EcadTrace) -> [f64; 5] {
     [trace.x0, trace.y0, trace.x1, trace.y1, trace.width]
 }
 
-fn trace_ok(trace: &EcadTrace) -> bool {
-    [trace.x0, trace.y0, trace.x1, trace.y1, trace.width].iter().all(|value| value.is_finite() && value.abs() < 10_000.0)
-        && trace.width > 0.0
-        && trace.width < 100.0
+fn copper_layer(trace: &EcadTrace) -> u32 {
+    if trace.layer == 0 { 1 } else { trace.layer }
 }
 
-fn set_layout(s: &mut Session, width: f64, height: f64, traces: Vec<EcadTrace>) {
-    s.doc_mut().board = Some(Board { width, height, traces });
+fn region_layer(region: &EcadRegion) -> u32 {
+    if region.layer == 0 { 1 } else { region.layer }
+}
+
+fn board_layers(s: &Session) -> u32 {
+    s.doc.board.as_ref().map(|board| board.layers.max(1)).unwrap_or(1)
+}
+
+fn trace_ok(trace: &EcadTrace) -> bool {
+    let ends = [trace.x0, trace.y0, trace.x1, trace.y1, trace.width];
+    if !ends.iter().all(|value| value.is_finite() && value.abs() < 10_000.0)
+        || trace.width <= 0.0
+        || trace.width >= 100.0
+        || copper_layer(trace) < 1
+        || copper_layer(trace) > MAX_ECAD_LAYERS
+    {
+        return false;
+    }
+    for offset in [trace.i, trace.j].into_iter().flatten() {
+        if !offset.is_finite() || offset.abs() >= 10_000.0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn region_ok(region: &EcadRegion) -> bool {
+    if region.points.len() < 3 || region.points.len() > MAX_ECAD_REGION_POINTS {
+        return false;
+    }
+    if region_layer(region) < 1 || region_layer(region) > MAX_ECAD_LAYERS {
+        return false;
+    }
+    region.points.iter().all(|point| point[0].is_finite() && point[1].is_finite() && point[0].abs() < 10_000.0 && point[1].abs() < 10_000.0)
+}
+
+fn set_layout(s: &mut Session, width: f64, height: f64, layers: u32, traces: Vec<EcadTrace>, regions: Vec<EcadRegion>) {
+    s.doc_mut().board = Some(Board { width, height, layers: layers.max(1), traces, regions });
     mirror_layout(s);
+}
+
+fn read_arc_offsets(cmd: &str, p: &Value) -> Result<(Option<f64>, Option<f64>, bool)> {
+    let i = match p.get("i") {
+        None => None,
+        Some(value) => {
+            let n = value.as_f64().ok_or_else(|| bad(cmd, "`i` must be a number"))?;
+            Some(board_mm(cmd, n, "i")?)
+        }
+    };
+    let j = match p.get("j") {
+        None => None,
+        Some(value) => {
+            let n = value.as_f64().ok_or_else(|| bad(cmd, "`j` must be a number"))?;
+            Some(board_mm(cmd, n, "j")?)
+        }
+    };
+    let clockwise = match p.get("clockwise") {
+        None => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => return Err(bad(cmd, "`clockwise` must be a boolean")),
+    };
+    Ok((i, j, clockwise))
+}
+
+fn read_region(cmd: &str, p: &Value, layer: u32, net: String) -> Result<EcadRegion> {
+    let items = p.get("points").and_then(Value::as_array).ok_or_else(|| bad(cmd, "`points` must be an array"))?;
+    if items.len() < 3 || items.len() > MAX_ECAD_REGION_POINTS {
+        return Err(bad(cmd, format!("a Gerber region needs 3…{MAX_ECAD_REGION_POINTS} points")));
+    }
+    let mut points = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let pair = item.as_array().ok_or_else(|| bad(cmd, format!("region point {index} must be [x, y]")))?;
+        if pair.len() != 2 {
+            return Err(bad(cmd, format!("region point {index} must be [x, y]")));
+        }
+        let x = pair.get(0).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("region point {index} x must be a number")))?;
+        let y = pair.get(1).and_then(Value::as_f64).ok_or_else(|| bad(cmd, format!("region point {index} y must be a number")))?;
+        points.push([board_mm(cmd, x, "points")?, board_mm(cmd, y, "points")?]);
+    }
+    let region = EcadRegion { points, layer, net };
+    if !region_ok(&region) {
+        return Err(bad(cmd, "a Gerber region is not usable"));
+    }
+    Ok(region)
 }
 
 fn mirror_layout(s: &mut Session) {
@@ -2797,20 +3283,41 @@ fn board_size(s: &Session) -> Option<(f64, f64)> {
     (schematic.board_width > 0.0 && schematic.board_height > 0.0).then_some((schematic.board_width, schematic.board_height))
 }
 
-fn count_drc(traces: &[EcadTrace], clearance: f64, min_width: f64) -> Result<(usize, usize)> {
+fn count_drc(
+    traces: &[EcadTrace],
+    regions: &[EcadRegion],
+    clearance: f64,
+    min_width: f64,
+    edge: f64,
+    board_w: f64,
+    board_h: f64,
+) -> Result<(usize, usize, usize)> {
     if traces.len() > MAX_ECAD_TRACES {
         return Err(bad("ecad.drc", "too many traces"));
+    }
+    if regions.len() > MAX_ECAD_REGIONS {
+        return Err(bad("ecad.drc", "too many Gerber regions"));
     }
     if traces.iter().any(|trace| !trace_ok(trace)) {
         return Err(bad("ecad.drc", "a trace is not usable"));
     }
+    if regions.iter().any(|region| !region_ok(region)) {
+        return Err(bad("ecad.drc", "a Gerber region is not usable"));
+    }
     let mut clearance_hits = 0;
     let mut width_hits = 0;
+    let mut edge_hits = 0;
     for (index, left) in traces.iter().enumerate() {
         if left.width + 1e-9 < min_width {
             width_hits += 1;
         }
+        if edge > 0.0 && board_w > 0.0 && board_h > 0.0 && board_edge_gap(left, board_w, board_h) + 1e-9 < edge {
+            edge_hits += 1;
+        }
         for right in traces.iter().skip(index + 1) {
+            if copper_layer(left) != copper_layer(right) {
+                continue;
+            }
             if same_net(left, right) {
                 continue;
             }
@@ -2819,7 +3326,59 @@ fn count_drc(traces: &[EcadTrace], clearance: f64, min_width: f64) -> Result<(us
             }
         }
     }
-    Ok((clearance_hits, width_hits))
+    for region in regions {
+        if edge > 0.0 && board_w > 0.0 && board_h > 0.0 && region_edge_gap(region, board_w, board_h) + 1e-9 < edge {
+            edge_hits += 1;
+        }
+        for edge_seg in region_edges(region) {
+            for trace in traces {
+                if region_layer(region) != copper_layer(trace) {
+                    continue;
+                }
+                if !region.net.is_empty() && region.net.eq_ignore_ascii_case(&trace.net) {
+                    continue;
+                }
+                let gap = segment_distance(edge_seg[0], edge_seg[1], [trace.x0, trace.y0], [trace.x1, trace.y1]) - trace.width * 0.5;
+                if gap + 1e-9 < clearance {
+                    clearance_hits += 1;
+                }
+            }
+        }
+    }
+    Ok((clearance_hits, width_hits, edge_hits))
+}
+
+fn region_edges(region: &EcadRegion) -> Vec<[[f64; 2]; 2]> {
+    let mut edges = Vec::new();
+    let points = &region.points;
+    let len = points.len();
+    if len < 2 {
+        return edges;
+    }
+    for index in 0..len {
+        let Some(a) = points.get(index).copied() else { continue };
+        let Some(b) = points.get((index + 1) % len).copied() else { continue };
+        edges.push([a, b]);
+    }
+    edges
+}
+
+fn region_edge_gap(region: &EcadRegion, board_w: f64, board_h: f64) -> f64 {
+    let mut best = f64::INFINITY;
+    for point in &region.points {
+        best = best.min(point[0]).min(point[1]).min(board_w - point[0]).min(board_h - point[1]);
+    }
+    best
+}
+
+fn board_edge_gap(trace: &EcadTrace, board_w: f64, board_h: f64) -> f64 {
+    let half = trace.width * 0.5;
+    let pts = [[trace.x0, trace.y0], [trace.x1, trace.y1], [(trace.x0 + trace.x1) * 0.5, (trace.y0 + trace.y1) * 0.5]];
+    let mut best = f64::INFINITY;
+    for [x, y] in pts {
+        best = best.min(x).min(y).min(board_w - x).min(board_h - y);
+    }
+    best - half
 }
 
 fn same_net(left: &EcadTrace, right: &EcadTrace) -> bool {
@@ -2889,16 +3448,44 @@ fn pcb_owner(s: &Session) -> Option<u64> {
     Some(s.doc.model_body_component(body))
 }
 
-fn existing_board(width: f64, height: f64, thickness: f64, volume: Option<f64>) -> Result<Value> {
-    let cmd = "ecad.push_3d";
-    let Some(volume) = volume else {
-        return Err(bad(cmd, "not supported yet: updating a pushed board"));
-    };
+fn existing_board(s: &mut Session, width: f64, height: f64, thickness: f64) -> Result<Value> {
+    let _cmd = "ecad.push_3d";
     let want = width * height * thickness;
-    if (volume - want).abs() <= 1e-3 * want.max(1.0) {
-        return Ok(json!({"body": "PCB", "component": "PCB", "unchanged": true, "thickness": thickness}));
+    if pcb_volume(s).is_some_and(|volume| (volume - want).abs() <= 1e-3 * want.max(1.0)) {
+        return Ok(json!({
+            "body": "PCB",
+            "component": "PCB",
+            "component_id": pcb_owner(s),
+            "unchanged": true,
+            "width": width,
+            "height": height,
+            "thickness": thickness,
+        }));
     }
-    Err(bad(cmd, "not supported yet: updating a pushed board"))
+    update_board(s, width, height, thickness)
+}
+
+fn update_board(s: &mut Session, width: f64, height: f64, thickness: f64) -> Result<Value> {
+    let cmd = "ecad.push_3d";
+    let component = pcb_owner(s).ok_or_else(|| bad(cmd, "the PCB body was not created"))?;
+    let occurrence = s.doc.occurrences.iter().find(|occurrence| occurrence.component == component).map(|occurrence| occurrence.id);
+    s.execute("component.activate", &json!({"component": component}))?;
+    s.execute("solid.remove", &json!({"bodies": ["PCB"]}))?;
+    s.execute("solid.box", &json!({"length": width, "width": height, "height": thickness, "body_name": "PCB", "operation": "new"}))?;
+    let owner = pcb_owner(s).ok_or_else(|| bad(cmd, "the PCB body was not created"))?;
+    if owner != component {
+        return Err(bad(cmd, "the PCB body is not in its component"));
+    }
+    Ok(json!({
+        "body": "PCB",
+        "component": "PCB",
+        "component_id": component,
+        "occurrence": occurrence,
+        "width": width,
+        "height": height,
+        "thickness": thickness,
+        "updated": true,
+    }))
 }
 
 fn place_board(s: &mut Session, width: f64, height: f64, thickness: f64) -> Result<Value> {
@@ -2991,6 +3578,7 @@ fn blank_generative(
         width: 0.0,
         height: 0.0,
         origin: [0.0, 0.0, 0.0],
+        cells: Vec::new(),
         stale: true,
     }
 }
@@ -3096,6 +3684,10 @@ fn gen_solve(s: &mut Session, p: &Value) -> Result<Value> {
         "stiffness" => Objective::Stiffness,
         _ => return Err(bad(cmd, "objective must be stiffness or mass")),
     };
+    let divisions = generative::lattice_divisions(match p.get("elements") {
+        None => 3,
+        Some(_) => element_count(cmd, p)?,
+    });
     let features = feature_ids(s);
     let mut keep = Vec::with_capacity(preserve.len());
     for body in &preserve {
@@ -3105,16 +3697,18 @@ fn gen_solve(s: &mut Session, p: &Value) -> Result<Value> {
     for body in &obstacle {
         block.push(body_region(s, cmd, body)?);
     }
-    let candidate = generative::section_reduction(&keep, &block, goal).map_err(|err| bad(cmd, err))?;
+    let candidate = generative::structured_lattice(&keep, &block, goal, divisions).map_err(|err| bad(cmd, err))?;
     if feature_ids(s) != features {
         return Err(bad(cmd, "the study changed the solid"));
     }
+    let cells: Vec<GenerativeCell> = candidate.cells.iter().map(|cell| GenerativeCell { origin: cell.origin, size: cell.size }).collect();
     if let Some(study) = s.doc_mut().generative.iter_mut().rev().find(|study| study.name == label) {
         study.method = candidate.method.to_string();
         study.length = candidate.size[0];
         study.width = candidate.size[1];
         study.height = candidate.size[2];
         study.origin = candidate.origin;
+        study.cells = cells.clone();
         study.candidate = None;
         study.stale = false;
     }
@@ -3127,6 +3721,7 @@ fn gen_solve(s: &mut Session, p: &Value) -> Result<Value> {
         "width": candidate.size[1],
         "height": candidate.size[2],
         "origin": candidate.origin,
+        "cells": cells.len(),
         "stale": false,
     }))
 }
@@ -3144,10 +3739,121 @@ fn next_candidate_name(s: &Session, cmd: &str) -> Result<String> {
     Err(bad(cmd, "the study exceeds the size cap"))
 }
 
+/// Build the candidate as the envelope box minus empty lattice slots.
+/// Face-adjacent joins fail (zero-thickness contact); cutting voids does not.
+fn promote_lattice_body(s: &mut Session, cmd: &str, body_name: &str, pieces: &[GenerativeCell], envelope: &GenerativeCell) -> Result<()> {
+    let Some(first) = pieces.first() else {
+        return Err(bad(cmd, "generate a candidate first"));
+    };
+    if pieces.len() == 1 {
+        s.execute(
+            "solid.box",
+            &json!({
+                "length": first.size[0],
+                "width": first.size[1],
+                "height": first.size[2],
+                "corner": first.origin,
+                "body_name": body_name,
+                "operation": "new",
+            }),
+        )?;
+        return Ok(());
+    }
+    let pitch = first.size;
+    for cell in pieces.iter().skip(1) {
+        for axis in 0..3 {
+            if (cell.size[axis] - pitch[axis]).abs() > 1e-6 {
+                return Err(bad(cmd, "lattice cells must share one pitch"));
+            }
+        }
+    }
+    let mut counts = [0usize; 3];
+    for axis in 0..3 {
+        if !(pitch[axis].is_finite() && pitch[axis] > 1e-9) {
+            return Err(bad(cmd, "generate a candidate first"));
+        }
+        let n = (envelope.size[axis] / pitch[axis]).round();
+        if !(n.is_finite() && n >= 1.0) || n as usize > generative::MAX_LATTICE_CELLS {
+            return Err(bad(cmd, "the study exceeds the size cap"));
+        }
+        if (n * pitch[axis] - envelope.size[axis]).abs() > pitch[axis] * 1e-3 + 1e-6 {
+            return Err(bad(cmd, "lattice cells do not fill the candidate"));
+        }
+        counts[axis] = n as usize;
+    }
+    let total = counts[0].saturating_mul(counts[1]).saturating_mul(counts[2]);
+    if total == 0 || total > generative::MAX_LATTICE_CELLS.saturating_mul(4) {
+        return Err(bad(cmd, "the study exceeds the size cap"));
+    }
+    let mut occupied = std::collections::BTreeSet::new();
+    for cell in pieces {
+        let mut idx = [0i32; 3];
+        for axis in 0..3 {
+            let t = (cell.origin[axis] - envelope.origin[axis]) / pitch[axis];
+            if !t.is_finite() {
+                return Err(bad(cmd, "generate a candidate first"));
+            }
+            let i = t.round() as i32;
+            if (t - f64::from(i)).abs() > 1e-3 {
+                return Err(bad(cmd, "lattice cells do not fill the candidate"));
+            }
+            if i < 0 || i as usize >= counts[axis] {
+                return Err(bad(cmd, "lattice cells do not fill the candidate"));
+            }
+            idx[axis] = i;
+        }
+        occupied.insert(idx);
+    }
+    if occupied.len() != pieces.len() {
+        return Err(bad(cmd, "lattice cells do not fill the candidate"));
+    }
+    s.execute(
+        "solid.box",
+        &json!({
+            "length": envelope.size[0],
+            "width": envelope.size[1],
+            "height": envelope.size[2],
+            "corner": envelope.origin,
+            "body_name": body_name,
+            "operation": "new",
+        }),
+    )?;
+    if occupied.len() == total {
+        return Ok(());
+    }
+    for iz in 0..counts[2] {
+        for iy in 0..counts[1] {
+            for ix in 0..counts[0] {
+                let idx = [ix as i32, iy as i32, iz as i32];
+                if occupied.contains(&idx) {
+                    continue;
+                }
+                let corner = [
+                    envelope.origin[0] + f64::from(idx[0]) * pitch[0],
+                    envelope.origin[1] + f64::from(idx[1]) * pitch[1],
+                    envelope.origin[2] + f64::from(idx[2]) * pitch[2],
+                ];
+                s.execute(
+                    "solid.box",
+                    &json!({
+                        "length": pitch[0],
+                        "width": pitch[1],
+                        "height": pitch[2],
+                        "corner": corner,
+                        "operation": "cut",
+                        "targets": [body_name],
+                    }),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn gen_promote(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "generative.promote";
     let wanted = str_(p, "name");
-    let (label, length, width, height, origin, method, stale, existing) = {
+    let (label, length, width, height, origin, method, stale, existing, cells) = {
         let study = s
             .doc
             .generative
@@ -3155,7 +3861,17 @@ fn gen_promote(s: &mut Session, p: &Value) -> Result<Value> {
             .rev()
             .find(|study| wanted.is_none_or(|n| study.name == n))
             .ok_or_else(|| bad(cmd, "generate a candidate first"))?;
-        (study.name.clone(), study.length, study.width, study.height, study.origin, study.method.clone(), study.stale, study.candidate.clone())
+        (
+            study.name.clone(),
+            study.length,
+            study.width,
+            study.height,
+            study.origin,
+            study.method.clone(),
+            study.stale,
+            study.candidate.clone(),
+            study.cells.clone(),
+        )
     };
     if method.is_empty() || !(length > 0.0 && width > 0.0 && height > 0.0) {
         return Err(bad(cmd, "generate a candidate first"));
@@ -3166,28 +3882,25 @@ fn gen_promote(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(body) = &existing
         && s.model.state().body(body).is_some()
     {
-        return Ok(json!({"body": body, "method": method}));
+        return Ok(json!({"body": body, "method": method, "cells": cells.len()}));
     }
     let body_name = next_candidate_name(s, cmd)?;
     let features = feature_ids(s);
-    s.execute(
-        "solid.box",
-        &json!({
-            "length": length,
-            "width": width,
-            "height": height,
-            "corner": origin,
-            "body_name": body_name,
-            "operation": "new",
-        }),
-    )?;
+    let cell_count = cells.len();
+    let pieces: Vec<GenerativeCell> = if cells.is_empty() { vec![GenerativeCell { origin, size: [length, width, height] }] } else { cells };
+    if pieces.len() > generative::MAX_LATTICE_CELLS {
+        return Err(bad(cmd, "the study exceeds the size cap"));
+    }
+    let envelope = GenerativeCell { origin, size: [length, width, height] };
+    promote_lattice_body(s, cmd, &body_name, &pieces, &envelope)?;
     if s.model.state().body(&body_name).is_none() || feature_ids(s).len() <= features.len() {
         return Err(bad(cmd, "the candidate body was not created"));
     }
     if let Some(study) = s.doc_mut().generative.iter_mut().rev().find(|study| study.name == label) {
         study.candidate = Some(body_name.clone());
     }
-    Ok(json!({"body": body_name, "method": method}))
+    let reported = if cell_count == 0 { pieces.len() } else { cell_count };
+    Ok(json!({"body": body_name, "method": method, "cells": reported}))
 }
 
 #[cfg(test)]
