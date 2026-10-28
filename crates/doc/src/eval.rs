@@ -2503,15 +2503,19 @@ fn feature_tools_with_constructor(
                     return Err(DocError::Invalid("not supported yet: taper with a start offset".into()));
                 }
                 let start_plane = ss.plane.offset(from);
-                let (pos, neg) = match (&extent.distance2, extent.direction) {
-                    (Some(d2), _) => {
+                // To Object already signed `d` from start toward the target; follow that sign and
+                // ignore a contradictory `direction` (same idea as the untapered path).
+                let (pos, neg) = match (&extent.distance2, extent.to.is_some(), extent.direction) {
+                    (Some(d2), _, _) => {
                         let other = val(vals, d2, Kind::Length)?.abs();
                         let here = d.abs();
                         (here, other)
                     }
-                    (None, crate::Direction::Symmetric) => (d.abs(), d.abs()),
-                    (None, crate::Direction::Negative) => (0.0, d.abs()),
-                    (None, _) => (d.abs(), 0.0),
+                    (None, true, _) if d >= 0.0 => (d, 0.0),
+                    (None, true, _) => (0.0, -d),
+                    (None, false, crate::Direction::Symmetric) => (d.abs(), d.abs()),
+                    (None, false, crate::Direction::Negative) => (0.0, d.abs()),
+                    (None, false, _) => (d.abs(), 0.0),
                 };
                 if pos <= 1e-9 && neg <= 1e-9 {
                     return Err(DocError::Invalid("extrude distance is zero".into()));
