@@ -13,32 +13,33 @@ use crate::{Result, Session};
 const MAX_NEST: usize = 256;
 
 pub static COMMANDS: &[CommandSpec] = &[
+    // Mold / DfAM live on UTILITIES so SOLID CREATE/MODIFY stay usable for modelling tools.
     CommandSpec::new("mold.box", "Mold Box", box_cmd)
-        .at("SOLID", "CREATE")
+        .at("UTILITIES", "CREATE")
         .icon("box")
         .params("body: prototype name; margin?: expr (default 5 mm); name?, body_name?"),
     CommandSpec::new("mold.cavity", "Mold Cavity", cavity)
-        .at("SOLID", "MODIFY")
+        .at("UTILITIES", "MODIFY")
         .icon("combine")
         .params("mold: box body; tool: prototype body (kept — same as combine cut with keep_tools)"),
-    CommandSpec::new("mold.split", "Split Mold", split).at("SOLID", "MODIFY").icon("split").params(
+    CommandSpec::new("mold.split", "Split Mold", split).at("UTILITIES", "MODIFY").icon("split").params(
         "body: mold name; plane?: XY|XZ|YZ|plane|{origin, normal} (default: mid-height parting through the mold AABB, Z-up); \
              body_names?: [lower, upper] preferred half names",
     ),
     CommandSpec::new("mold.alignment_pins", "Alignment Pins", pins)
-        .at("SOLID", "CREATE")
+        .at("UTILITIES", "CREATE")
         .icon("hole")
         .params("upper, lower: half names; diameter, depth: expr (bosses on upper, matching holes in lower at the four parting corners)"),
     CommandSpec::new("mold.pour_spout", "Pour Spout", spout)
-        .at("SOLID", "MODIFY")
+        .at("UTILITIES", "MODIFY")
         .icon("extrude")
         .params("body: mold name; width, depth: expr (channel cut from the outer −Y face into the cavity)"),
     CommandSpec::new("dfam.clearance", "Clearance Gap", clearance)
-        .at("SOLID", "MODIFY")
+        .at("UTILITIES", "MODIFY")
         .icon("offset")
         .params("body: name; gap: expr (faces move inward; a parameter name re-evaluates on change)"),
     CommandSpec::new("dfam.nest", "Nest Bodies", nest)
-        .at("SOLID", "MODIFY")
+        .at("UTILITIES", "MODIFY")
         .icon("rect")
         .params("bodies: [unique names]; width, depth: bed size; gap?: expr (tallest-first shelf pack)"),
 ];

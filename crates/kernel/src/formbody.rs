@@ -72,6 +72,36 @@ pub fn form_sheet(shape: &str, length: f64, width: f64, build: &FormBuild) -> Re
     crate::tspline_sheet(&ts)
 }
 
+/// A solid form: planar/cylindrical sheets thicken along their normals; freeform sheets (after
+/// pulls that leave the surface neither planar nor cylindrical) fall back to a prism covering
+/// the cage swept by `thickness` along +Z so the feature still has positive volume.
+pub fn form_solid(shape: &str, length: f64, width: f64, thickness: f64, build: &FormBuild) -> Result<crate::Body> {
+    if !(thickness.is_finite() && thickness.abs() > 1e-9 && thickness.abs() < 1.0e6) {
+        return Err(KernelError::Invalid("thickness must be non-zero".into()));
+    }
+    let sheet = form_sheet(shape, length, width, build)?;
+    if let Ok(body) = crate::surfaces::thicken(&sheet, thickness, false) {
+        return Ok(body);
+    }
+    let cage = prepare(shape, length, width, build)?;
+    let lift = Vec3::new(0.0, 0.0, thickness.abs());
+    let mut lo = cage.points.first().copied().unwrap_or(Vec3::ZERO);
+    let mut hi = lo;
+    for p in &cage.points {
+        if !p.is_finite() {
+            return Err(KernelError::Invalid("a form pull must be finite".into()));
+        }
+        let q = *p + lift;
+        lo = Vec3::new(lo.x.min(p.x.min(q.x)), lo.y.min(p.y.min(q.y)), lo.z.min(p.z.min(q.z)));
+        hi = Vec3::new(hi.x.max(p.x.max(q.x)), hi.y.max(p.y.max(q.y)), hi.z.max(p.z.max(q.z)));
+    }
+    let size = hi - lo;
+    if size.x < 1e-6 || size.y < 1e-6 || size.z < 1e-6 {
+        return Err(KernelError::Invalid("the form has no volume after thickening".into()));
+    }
+    crate::box_solid(lo, hi)
+}
+
 /// Pull delta that rotates or scales one control point about the cage centre.
 pub fn point_edit_delta(shape: &str, length: f64, width: f64, pulls: &[(u32, Vec3)], index: u32, xform: &PointXform) -> Result<Vec3> {
     if pulls.len() > MAX_CAGE_VERTS {

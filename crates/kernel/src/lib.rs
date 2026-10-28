@@ -82,7 +82,8 @@ pub use build::{
 pub use delete_face::delete_faces;
 pub use emboss::{cylinder_emboss_anchor, emboss_cylinder, emboss_cylinder_at, has_cylinder_emboss_wall, infer_cylinder_emboss};
 pub use formbody::{
-    FormBuild, MAX_CAGE_VERTS, MAX_SUBDIV_LEVEL, PointXform, bridge_deltas, cage_points, edge_ends, form_sheet, point_edit_delta, ruled_sheet,
+    FormBuild, MAX_CAGE_VERTS, MAX_SUBDIV_LEVEL, PointXform, bridge_deltas, cage_points, edge_ends, form_sheet, form_solid, point_edit_delta,
+    ruled_sheet,
 };
 pub use helix::{loft_to_point, sweep_helix, sweep_helix_mesh};
 pub use iges_in::{MAX_IGES_BYTES, iges_import, iges_to_step};

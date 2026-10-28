@@ -4680,17 +4680,16 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 }
             }
             let thickness = if finished.as_deref() == Some("surface") { 0.0 } else { t };
-            let sheet = kernel::form_sheet(shape, l, w, &build)?;
             let solid = if thickness.abs() > 1e-6 {
-                match kernel::thicken(&sheet, thickness, false) {
+                match kernel::form_solid(shape, l, w, thickness, &build) {
                     Ok(b) => b,
-                    Err(_) => {
-                        *warning = Some("the form stayed a surface: thickening needs a plane or a cylinder".into());
-                        sheet
+                    Err(e) => {
+                        *warning = Some(format!("the form stayed a surface: {e}"));
+                        kernel::form_sheet(shape, l, w, &build)?
                     }
                 }
             } else {
-                sheet
+                kernel::form_sheet(shape, l, w, &build)?
             };
             let name = new_name(st, f, 0);
             st.bodies.push(ModelBody::new(name, solid, f.id));

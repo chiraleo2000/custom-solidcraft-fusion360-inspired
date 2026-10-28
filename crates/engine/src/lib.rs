@@ -604,7 +604,9 @@ impl Session {
                         None => self.refresh(),
                     }
                 }
-                if spec.id != "ui.repeat_last" {
+                // Discovery / view-only commands (`.doc_only()` → `reads_model = false`) must not
+                // become "Repeat Last"; the context menu only offers a real CAD command.
+                if spec.id != "ui.repeat_last" && spec.reads_model {
                     self.last_command = Some((spec.id.to_string(), given.clone()));
                 }
                 Ok(v)

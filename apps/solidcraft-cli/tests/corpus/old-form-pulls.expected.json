@@ -31,11 +31,11 @@
         "shells": 1,
         "vertices": 4
       },
-      "mass_g": -1.305367307896848,
+      "mass_g": 0.0,
       "material": "Default",
       "name": "Body1",
       "vertices": 1,
-      "volume_mm3": -1011.9126417805023
+      "volume_mm3": 0.0
     }
   ],
   "body_count": 1

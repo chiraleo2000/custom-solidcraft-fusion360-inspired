@@ -36,6 +36,7 @@ pub fn panels(tab: &str) -> &'static [&'static str] {
         "DRAWING" => &["CREATE", "MODIFY", "SELECT"],
         "SHEET METAL" => &["CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
         "PLASTIC" => &["CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"],
+        "UTILITIES" => &["CREATE", "MODIFY", "SELECT"],
         _ => &["MAKE", "ADD-INS", "UTILITY", "INSPECT", "SELECT"],
     }
 }
