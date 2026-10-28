@@ -113,10 +113,12 @@ pub fn panels(tab: &str) -> Option<&'static [&'static str]> {
 }
 
 /// Solid MODIFY panel order: Press/Pull first so the unified edit gesture is a toolbar button.
+/// `solid.scale` stays in the promoted four so panel-drop scenarios keep a visible Scale handle.
 const SOLID_MODIFY: &[&str] = &[
     "solid.press_pull",
     "solid.fillet",
     "solid.chamfer",
+    "solid.scale",
     "solid.shell",
     "solid.move",
     "solid.combine",
@@ -125,7 +127,6 @@ const SOLID_MODIFY: &[&str] = &[
     "solid.split_body",
     "solid.split_face",
     "face.delete",
-    "solid.scale",
     "solid.remove",
 ];
 
