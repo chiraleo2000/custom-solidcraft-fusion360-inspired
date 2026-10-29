@@ -257,8 +257,11 @@ fn draw(app: &SolveApp, ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj,
     // diameter is typed in the box.
     let mut dir = dir;
     // Extrude taper: a handle beside the arrow tip; dragging it sideways tilts the walls.
+    // One Side, Two Sides and Symmetric all take taper (dialog); start-offset still refuses it.
     let cam_right = app.cam.basis().0;
-    if let (Kind::Extrude { direction: 0 | 1, distance, taper, taper_present, to_offset, .. }, Some(n)) = (&mut d.kind, dir) {
+    if let (Kind::Extrude { distance, taper, taper_present, to_offset, start, .. }, Some(n)) = (&mut d.kind, dir)
+        && start.trim().is_empty()
+    {
         let n = n * sign;
         let span = to_span.map(|span| span.abs() + app.session.doc.eval(to_offset, ValueKind::Length).unwrap_or(0.0)).or(all_span);
         if let Ok(l) = span.map(Ok).unwrap_or_else(|| app.session.doc.eval(distance, ValueKind::Length))
@@ -408,6 +411,7 @@ fn taper_handle(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, foot: V
     let l = span.len();
     let end = foot + span + e * (l * angle.tan().clamp(-10.0, 10.0));
     let (Some(fs), Some(es)) = (proj.to_screen(foot), proj.to_screen(end)) else { return };
+    crate::scenario::publish_handle("taper", es);
     let r = ui.interact(egui::Rect::from_center_size(es, vec2(16.0, 16.0)), egui::Id::new("sc_taper"), egui::Sense::drag());
     let hot = r.hovered() || r.dragged();
     let col = if hot { t.accent } else { t.manipulator };
@@ -415,6 +419,15 @@ fn taper_handle(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, foot: V
     painter.circle(es, if hot { 6.5 } else { 5.0 }, t.overlay, Stroke::new(2.0, col));
     if hot {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        // On-canvas angle readout beside the ring (dialog field stays authoritative).
+        let deg = angle.to_degrees();
+        let txt = format!("{deg:.1}");
+        let label = format!("{}°", txt.trim_end_matches('0').trim_end_matches('.'));
+        let galley = painter.layout_no_wrap(label, egui::FontId::proportional(12.0), t.text);
+        let mid = es + vec2(12.0, -10.0);
+        let rect = egui::Rect::from_min_size(mid, galley.size() + vec2(8.0, 4.0));
+        painter.rect(rect, 3.0, t.overlay, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+        painter.galley(rect.min + vec2(4.0, 2.0), galley, t.text);
     }
     if r.dragged()
         && let Some(p) = r.interact_pointer_pos()

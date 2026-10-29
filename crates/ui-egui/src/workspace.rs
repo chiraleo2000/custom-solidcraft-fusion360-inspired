@@ -108,6 +108,7 @@ pub fn panels(tab: &str) -> Option<&'static [&'static str]> {
         "SOLID" => Some(&["CREATE", "MODIFY", "ASSEMBLE", "POSITION", "CONFIGURE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"]),
         "PLASTIC" => Some(&["SETUP", "CREATE", "MODIFY", "ASSEMBLE", "CONSTRUCT", "INSPECT", "INSERT", "SELECT"]),
         "ELECTRONICS" => Some(&["CREATE", "INSPECT"]),
+        "UTILITIES" => Some(&["CREATE", "MODIFY", "MAKE", "SELECT"]),
         _ => None,
     }
 }
@@ -159,6 +160,15 @@ const ELECTRONICS_CREATE: &[&str] = &["ecad.schematic", "ecad.board", "ecad.trac
 
 const ELECTRONICS_INSPECT: &[&str] = &["ecad.erc", "ecad.drc"];
 
+/// UTILITIES CREATE: mold stock and alignment before cavity edits.
+const UTILITIES_CREATE: &[&str] = &["mold.box", "mold.alignment_pins"];
+
+/// UTILITIES MODIFY: cavity / split / spout, then print clearance and nesting.
+const UTILITIES_MODIFY: &[&str] = &["mold.cavity", "mold.split", "mold.pour_spout", "dfam.clearance", "dfam.nest"];
+
+/// UTILITIES MAKE: setup → tool → common 2.5D paths (rest stay in the panel overflow).
+const UTILITIES_MAKE: &[&str] = &["cam.setup", "cam.tool", "cam.pocket", "cam.face", "cam.drill", "cam.adaptive"];
+
 /// The commands a panel shows, in order, and how many get a big button; `None` leaves the panel
 /// to the registry.
 pub fn layout<'a>(tab: &str, panel: &str, specs: &[&'a CommandSpec]) -> Option<(Vec<&'a CommandSpec>, usize)> {
@@ -190,6 +200,9 @@ pub fn layout<'a>(tab: &str, panel: &str, specs: &[&'a CommandSpec]) -> Option<(
         ("DRAWING", "MODIFY") => (DRAWING_MODIFY, 4, tab),
         ("ELECTRONICS", "CREATE") => (ELECTRONICS_CREATE, 4, tab),
         ("ELECTRONICS", "INSPECT") => (ELECTRONICS_INSPECT, 2, tab),
+        ("UTILITIES", "CREATE") => (UTILITIES_CREATE, 2, tab),
+        ("UTILITIES", "MODIFY") => (UTILITIES_MODIFY, 3, tab),
+        ("UTILITIES", "MAKE") => (UTILITIES_MAKE, 4, tab),
         // The solid tab's panels.
         ("PLASTIC", "MODIFY") => (&[], 4, "SOLID"),
         ("SURFACE" | "SHEET METAL" | "PLASTIC", "CONSTRUCT" | "INSPECT" | "INSERT") => (&[], 2, "SOLID"),
@@ -305,5 +318,16 @@ mod tests {
         assert!(ecreate.contains(&"ecad.push_3d") && ecreate.contains(&"ecad.export"), "{ecreate:?}");
         assert!(ids("ELECTRONICS", "INSPECT").contains(&"ecad.drc"));
         assert_eq!(tabs_for_workspace("DESIGN"), tabs_for_workspace("unknown"));
+        assert!(tabs_for_workspace("DESIGN").contains(&"UTILITIES"));
+        assert!(panels("UTILITIES").is_some_and(|p| p == ["CREATE", "MODIFY", "MAKE", "SELECT"]));
+        let mold = ids("UTILITIES", "CREATE");
+        assert_eq!(mold.first().copied(), Some("mold.box"), "{mold:?}");
+        assert!(mold.contains(&"mold.alignment_pins"), "{mold:?}");
+        let mold_mod = ids("UTILITIES", "MODIFY");
+        assert!(mold_mod.contains(&"mold.cavity") && mold_mod.contains(&"dfam.nest"), "{mold_mod:?}");
+        let make = ids("UTILITIES", "MAKE");
+        assert_eq!(make.first().copied(), Some("cam.setup"), "{make:?}");
+        assert!(make.contains(&"cam.pocket") && make.contains(&"cam.adaptive"), "{make:?}");
+        assert_eq!(crate::toolbar::panels("UTILITIES"), ["CREATE", "MODIFY", "MAKE", "SELECT"]);
     }
 }
