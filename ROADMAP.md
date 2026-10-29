@@ -56,7 +56,10 @@ exclusions (not deferred work):
 
 This fork's `dev` branch carries the stages through electronics: surfaces, form, mesh
 reconstruction, drawings, CAM, mold and DfAM, simulation, presentation, and schematic/PCB
-with a 3D board.
+with a 3D board. Year-2 sheet, mold and DfAM recipes live in
+`tests/workflows/pdf_day20_hinge.json`, `pdf_day21_mold.json`, `pdf_day22_two_part_mold.json`
+and `pdf_day24_sheet.json`. UTILITIES dialogs cover mold box, keep-tool cavity, mid-height
+parting, pins, spout, parametric clearance and shelf nest.
 
 ## Milestones
 

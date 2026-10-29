@@ -1,0 +1,39 @@
+{
+  "id": "pdf_day21_mold",
+  "day": 21,
+  "title": "One-part mold with keep tools",
+  "description": "Mold box around a prototype, then Combine Cut with Keep Tools so the tool survives the cavity.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "solid.box",
+      "params": {
+        "length": 24,
+        "width": 18,
+        "height": 10,
+        "body_name": "Proto"
+      }
+    },
+    {
+      "command": "mold.box",
+      "params": {
+        "body": "Proto",
+        "margin": "5",
+        "body_name": "Mold",
+        "name": "Block"
+      }
+    },
+    {
+      "command": "solid.combine",
+      "params": {
+        "target": "Mold",
+        "tools": [
+          "Proto"
+        ],
+        "operation": "cut",
+        "keep_tools": true,
+        "name": "KeepCut"
+      }
+    }
+  ]
+}

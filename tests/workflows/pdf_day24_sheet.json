@@ -1,0 +1,90 @@
+{
+  "id": "pdf_day24_sheet",
+  "day": 24,
+  "title": "Sheet metal bracket",
+  "description": "Rule, base flange, edge flange, flat pattern, DXF layers, unfold and refold.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "sheet.manage_rules",
+      "params": {
+        "name": "Steel",
+        "thickness": "1 mm",
+        "bend_radius": "1 mm",
+        "corner_relief_shape": "round",
+        "active": true
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "Base"
+      }
+    },
+    {
+      "command": "sketch.rectangle.two_point",
+      "params": {
+        "p0": [
+          0,
+          0
+        ],
+        "p1": [
+          80,
+          50
+        ]
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "sheet.flange",
+      "params": {
+        "sketch": "Base",
+        "rule": "Steel",
+        "body_name": "Bracket"
+      }
+    },
+    {
+      "command": "sheet.flange",
+      "params": {
+        "edges": [
+          [
+            40,
+            0,
+            1
+          ]
+        ],
+        "height": "20 mm",
+        "angle": "90 deg",
+        "body": "Bracket"
+      }
+    },
+    {
+      "command": "sheet.flat_pattern",
+      "params": {
+        "body": "Bracket"
+      }
+    },
+    {
+      "command": "sheet.export_dxf",
+      "params": {
+        "body": "Bracket"
+      }
+    },
+    {
+      "command": "sheet.unfold",
+      "params": {
+        "body": "Bracket"
+      }
+    },
+    {
+      "command": "sheet.refold",
+      "params": {
+        "body": "Bracket"
+      }
+    }
+  ]
+}

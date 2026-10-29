@@ -193,6 +193,17 @@ fn flange_type(inputs: &[SelInput]) -> usize {
 }
 
 /// The dialog's own rows (after the selection inputs); true when Enter was pressed in a value.
+fn note_unfold(ui: &mut egui::Ui, refold: bool) {
+    row_label(ui, "");
+    let text = if refold {
+        "Refold restores the bends. Create Flat Pattern still exports DXF layers OUTLINE, BEND_UP and BEND_DOWN."
+    } else {
+        "Unfold flattens bends in the model. Create Flat Pattern exports those DXF layers without replacing the folded body until you save the file."
+    };
+    ui.label(RichText::new(text).weak().small());
+    ui.end_row();
+}
+
 pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [SelInput]) -> bool {
     let t = Tokens::get();
     let mut enter = false;
@@ -294,7 +305,9 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Sm, inputs: &mut [Sel
             ui.checkbox(flip, "");
             ui.end_row();
         }
-        Sm::Unfold { .. } => {}
+        Sm::Unfold { refold } => {
+            note_unfold(ui, *refold);
+        }
         Sm::Convert { rule } => rule_combo(app, ui, "sm_conv_rule", rule),
         Sm::Rules { pick, name, values, relief, active, loaded } => {
             let rules = rule_list(app);

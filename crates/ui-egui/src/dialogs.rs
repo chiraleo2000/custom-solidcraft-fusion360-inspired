@@ -234,6 +234,8 @@ pub enum Kind {
     Sheet(crate::dialogs_sheet::Sm),
     /// Surface tools and Split Face (`dialogs_surface`).
     Surface(crate::dialogs_surface::Surf),
+    /// Mold and DfAM (`dialogs_mold`).
+    Mold(crate::dialogs_mold::Mold),
     /// Plastic features (`dialogs_plastic`).
     Plastic(crate::dialogs_plastic::Pl),
     /// Appearance (`dialogs_appearance`).
@@ -469,6 +471,7 @@ impl Dialog {
                 let (kind, inputs) = crate::dialogs_assembly::start(app, id)
                     .or_else(|| crate::dialogs_sheet::start(app, id))
                     .or_else(|| crate::dialogs_surface::start(app, id))
+                    .or_else(|| crate::dialogs_mold::start(app, id))
                     .or_else(|| crate::dialogs_plastic::start(app, id))
                     .or_else(|| crate::dialogs_appearance::start(app, id))
                     .or_else(|| crate::dialogs_motion::start(app, id))
@@ -571,7 +574,7 @@ impl Dialog {
         match &self.kind {
             Kind::Assembly(k) => return k.previews(),
             Kind::Sheet(k) => return k.previews(),
-            Kind::Surface(_) => return true,
+            Kind::Surface(_) | Kind::Mold(_) => return true,
             Kind::Plastic(k) => return k.previews(),
             Kind::Part(_) => return true,
             _ => {}
@@ -634,6 +637,7 @@ impl Dialog {
             Kind::OffsetFaces { distance } => ("Distance", ValueKind::Length, distance),
             Kind::Sheet(k) => return k.primary(&self.inputs),
             Kind::Surface(k) => return k.primary(),
+            Kind::Mold(k) => return k.primary(),
             Kind::Plastic(k) => return k.primary(),
             _ => return None,
         })
@@ -880,6 +884,7 @@ fn title(k: &Kind) -> &'static str {
         Kind::Assembly(k) => k.title(),
         Kind::Sheet(k) => k.title(),
         Kind::Surface(k) => k.title(),
+        Kind::Mold(k) => k.title(),
         Kind::Plastic(k) => k.title(),
         Kind::Appearance(_) => "APPEARANCE",
         Kind::Motion(k) => k.title(),
@@ -2042,6 +2047,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     Kind::Assembly(k) => enter |= crate::dialogs_assembly::rows(app, ui, k, &mut d.inputs, &mut d.active),
                     Kind::Sheet(k) => enter |= crate::dialogs_sheet::rows(app, ui, k, &mut d.inputs),
                     Kind::Surface(k) => enter |= crate::dialogs_surface::rows(ui, k),
+                    Kind::Mold(k) => enter |= crate::dialogs_mold::rows(ui, k),
                     Kind::Plastic(k) => enter |= crate::dialogs_plastic::rows(app, ui, k, &d.inputs),
                     Kind::Appearance(k) => enter |= crate::dialogs_appearance::rows(app, ui, k, &mut d.inputs),
                     Kind::Motion(k) => enter |= crate::dialogs_motion::rows(app, ui, k, &mut d.inputs),
@@ -3069,6 +3075,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
         Kind::Assembly(k) => return crate::dialogs_assembly::commands(app, k, &d.inputs),
         Kind::Sheet(k) => return crate::dialogs_sheet::commands(app, k, &d.inputs, &d.extra),
         Kind::Surface(k) => return crate::dialogs_surface::commands(app, k, &d.inputs, &d.extra),
+        Kind::Mold(k) => return crate::dialogs_mold::commands(app, k, &d.inputs),
         Kind::Plastic(k) => return crate::dialogs_plastic::commands(app, k, &d.inputs, &d.extra),
         Kind::Appearance(k) => return Ok(crate::dialogs_appearance::commands(k, &d.inputs)),
         Kind::Motion(k) => return crate::dialogs_motion::commands(app, k, &d.inputs),
@@ -3925,12 +3932,16 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d
         }
         other => {
-            let (kind, inputs, extra) = crate::dialogs_sheet::for_feature(app, other)
-                .or_else(|| crate::dialogs_plastic::for_feature(app, other))
-                .or_else(|| crate::dialogs_surface::for_feature(app, other))?;
-            let mut d = Dialog::new(kind, inputs);
-            d.extra = extra;
-            d
+            if let Some(d) = crate::dialogs_mold::from_feature(app, &f) {
+                d
+            } else {
+                let (kind, inputs, extra) = crate::dialogs_sheet::for_feature(app, other)
+                    .or_else(|| crate::dialogs_plastic::for_feature(app, other))
+                    .or_else(|| crate::dialogs_surface::for_feature(app, other))?;
+                let mut d = Dialog::new(kind, inputs);
+                d.extra = extra;
+                d
+            }
         }
     };
     d.editing = Some((id, marker));

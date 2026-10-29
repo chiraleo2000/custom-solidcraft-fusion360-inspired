@@ -1,0 +1,60 @@
+{
+  "id": "pdf_day22_two_part_mold",
+  "day": 22,
+  "title": "Two-part mold",
+  "description": "Cavity keeps the prototype, mid-height split, alignment pins, and a pour spout on the lower half.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "solid.box",
+      "params": {
+        "length": 24,
+        "width": 18,
+        "height": 10,
+        "body_name": "Proto"
+      }
+    },
+    {
+      "command": "mold.box",
+      "params": {
+        "body": "Proto",
+        "margin": "5",
+        "body_name": "Mold"
+      }
+    },
+    {
+      "command": "mold.cavity",
+      "params": {
+        "mold": "Mold",
+        "tool": "Proto"
+      }
+    },
+    {
+      "command": "mold.split",
+      "params": {
+        "body": "Mold",
+        "body_names": [
+          "Lower",
+          "Upper"
+        ]
+      }
+    },
+    {
+      "command": "mold.alignment_pins",
+      "params": {
+        "upper": "Upper",
+        "lower": "Lower",
+        "diameter": "3",
+        "depth": "3"
+      }
+    },
+    {
+      "command": "mold.pour_spout",
+      "params": {
+        "body": "Lower",
+        "width": "5",
+        "depth": "6"
+      }
+    }
+  ]
+}

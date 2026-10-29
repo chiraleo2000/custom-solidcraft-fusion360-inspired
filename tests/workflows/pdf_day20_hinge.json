@@ -1,0 +1,40 @@
+{
+  "id": "pdf_day20_hinge",
+  "day": 20,
+  "title": "Print-in-place hinge clearance",
+  "description": "A user parameter drives a clearance gap on a hinge leaf and rebuilds when the gap changes.",
+  "smoke": false,
+  "commands": [
+    {
+      "command": "parameters.add",
+      "params": {
+        "name": "clearance",
+        "expression": "0.4 mm"
+      }
+    },
+    {
+      "command": "solid.box",
+      "params": {
+        "length": 40,
+        "width": 20,
+        "height": 6,
+        "body_name": "Leaf"
+      }
+    },
+    {
+      "command": "dfam.clearance",
+      "params": {
+        "body": "Leaf",
+        "gap": "clearance",
+        "name": "PrintGap"
+      }
+    },
+    {
+      "command": "parameters.change",
+      "params": {
+        "name": "clearance",
+        "expression": "0.8 mm"
+      }
+    }
+  ]
+}

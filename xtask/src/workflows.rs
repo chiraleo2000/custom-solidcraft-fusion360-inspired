@@ -13,8 +13,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
-/// Year-1 Wave E required days (plus Day 23 smoke). Days 20–22/24 and 28–30 are Year 2–3.
-const REQUIRED_DAYS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 23, 25, 26, 27];
+/// Year-1 Wave E days plus Year-2 sheet/mold days (20–22, 24) and Day 23 smoke.
+/// Days 28–30 stay optional until the render/animation recipes are required.
+const REQUIRED_DAYS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27];
 
 /// PR / `cargo xtask ci` subset: early design days plus smoke-flagged recipes.
 const CI_DAYS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 19, 23];

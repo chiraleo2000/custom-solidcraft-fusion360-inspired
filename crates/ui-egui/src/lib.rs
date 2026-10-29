@@ -21,6 +21,7 @@ pub mod dialog_frame;
 pub mod dialogs;
 pub mod dialogs_appearance;
 pub mod dialogs_assembly;
+pub mod dialogs_mold;
 pub mod dialogs_motion;
 pub mod dialogs_move;
 pub mod dialogs_parts;
